@@ -8,15 +8,28 @@ async function safeFetchJson<T>(url: string, options?: RequestInit, fallback?: P
       try {
         const jsonErr = JSON.parse(text);
         if (jsonErr && typeof jsonErr === 'object') {
-          return { success: false, message: `HTTP ${res.status}: ${res.statusText}`, ...jsonErr, ...fallback } as T;
+          return {
+            ...fallback,
+            ...jsonErr,
+            success: false,
+            message: jsonErr.message || jsonErr.error || `HTTP ${res.status}: ${res.statusText}`,
+          } as T;
         }
       } catch {}
-      return { success: false, message: `HTTP ${res.status}: ${res.statusText}`, ...fallback } as unknown as T;
+      return {
+        ...fallback,
+        success: false,
+        message: `HTTP ${res.status}: ${res.statusText}`,
+      } as unknown as T;
     }
     return await res.json();
   } catch (err: any) {
     console.warn(`[API] safeFetchJson caught error for ${url}:`, err.message || err);
-    return { success: false, message: "خطا در برقراری ارتباط با سرور", ...fallback } as unknown as T;
+    return {
+      ...fallback,
+      success: false,
+      message: "خطا در برقراری ارتباط با سرور",
+    } as unknown as T;
   }
 }
 
@@ -93,7 +106,7 @@ export async function getTelegramClientStatus(): Promise<{ clientConfig: Telegra
   });
 }
 
-export async function sendTelegramClientCode(apiId: string, apiHash: string, phoneNumber: string): Promise<{ success: boolean; message: string; phoneCodeHash?: string }> {
+export async function sendTelegramClientCode(apiId: string, apiHash: string, phoneNumber: string): Promise<{ success: boolean; message: string; phoneCodeHash?: string; isCodeViaApp?: boolean; errorCode?: string; phoneNumber?: string }> {
   return safeFetchJson("/api/telegram-client/send-code", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

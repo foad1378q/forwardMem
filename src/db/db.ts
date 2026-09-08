@@ -391,7 +391,7 @@ async function initializeDefaultRecordsInPostgres() {
   // 2. telegram_client
   await pool.query(`
     INSERT INTO telegram_client (id, api_id, api_hash, phone_number, connected_phone, telegram_session, is_client_connected, is_monitoring_paused)
-    VALUES ('default', 2040, 'b18441a1ed60741557078c33d425e276', '', '', '', false, false)
+    VALUES ('default', NULL, '', '', '', '', false, false)
     ON CONFLICT (id) DO NOTHING;
   `);
 
@@ -487,7 +487,7 @@ async function checkAndPerformMigration() {
            telegram_session = EXCLUDED.telegram_session,
            is_client_connected = EXCLUDED.is_client_connected`,
           [
-            store.telegramClientConfig?.apiId || 2040,
+            store.telegramClientConfig?.apiId || null,
             encryptedApiHash,
             encryptedPhone,
             store.telegramClientConfig?.connectedPhone || encryptedPhone,
@@ -718,7 +718,7 @@ export async function getStoreFromDb(): Promise<any> {
   return {
     adminPasswordHash: settingsRow.admin_password_hash || 'admin123',
     telegramClientConfig: {
-      apiId: clientRow.api_id || 2040,
+      apiId: clientRow.api_id ? Number(clientRow.api_id) : null,
       apiHash,
       phoneNumber,
       session,
@@ -1014,7 +1014,7 @@ export async function saveTelegramClientConfigToDb(clientConfig: any, sessionStr
       last_connected_at = EXCLUDED.last_connected_at,
       updated_at = NOW()`,
       [
-        clientConfig.apiId || 2040,
+        clientConfig.apiId || null,
         encryptedApiHash,
         encryptedPhone,
         clientConfig.connectedPhone || encryptedPhone,

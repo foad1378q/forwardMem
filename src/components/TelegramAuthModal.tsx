@@ -18,6 +18,7 @@ interface TelegramAuthModalProps {
   onClose: () => void;
   phoneNumber: string;
   initialRequiresPassword?: boolean;
+  isCodeViaApp?: boolean;
   onSuccess: (config: TelegramClientConfig) => void;
 }
 
@@ -26,6 +27,7 @@ export const TelegramAuthModal: React.FC<TelegramAuthModalProps> = ({
   onClose,
   phoneNumber,
   initialRequiresPassword = false,
+  isCodeViaApp = false,
   onSuccess,
 }) => {
   const [step, setStep] = useState<'code' | 'password'>(
@@ -36,6 +38,17 @@ export const TelegramAuthModal: React.FC<TelegramAuthModalProps> = ({
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+
+  const normalizeDigits = (str: string): string => {
+    const persianDigits = ['۰', '۱', '۲', '۳', '۴', '۵', '۶', '۷', '۸', '۹'];
+    const arabicDigits = ['٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩'];
+    let res = str;
+    for (let i = 0; i < 10; i++) {
+      res = res.replace(new RegExp(persianDigits[i], 'g'), i.toString());
+      res = res.replace(new RegExp(arabicDigits[i], 'g'), i.toString());
+    }
+    return res.trim();
+  };
 
   useEffect(() => {
     if (isOpen) {
@@ -51,7 +64,8 @@ export const TelegramAuthModal: React.FC<TelegramAuthModalProps> = ({
 
   const handleVerifyCodeSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!code.trim()) {
+    const cleanCode = normalizeDigits(code).replace(/\D/g, '');
+    if (!cleanCode) {
       setError('لطفاً کد تایید ۵ رقمی دریافتی را وارد کنید.');
       return;
     }
@@ -60,7 +74,7 @@ export const TelegramAuthModal: React.FC<TelegramAuthModalProps> = ({
     setError(null);
 
     try {
-      const res = await verifyTelegramClientCode(code.trim());
+      const res = await verifyTelegramClientCode(cleanCode);
       if (res.success && res.clientConfig) {
         setSuccessMsg(res.message || 'اتصال کلاینت تلگرام با موفقیت انجام شد!');
         setTimeout(() => {
@@ -154,9 +168,21 @@ export const TelegramAuthModal: React.FC<TelegramAuthModalProps> = ({
         {/* Step 1: Verification Code Form */}
         {step === 'code' && (
           <form onSubmit={handleVerifyCodeSubmit} className="space-y-4">
-            <div className="p-3 bg-blue-50/60 border border-blue-100 rounded-2xl text-xs text-blue-800 leading-relaxed">
-              کد ۵ رقمی تایید به تلگرام شما ارسال شد. لطفاً آن را در کادر زیر وارد نمایید.
-            </div>
+            {isCodeViaApp ? (
+              <div className="p-3 bg-amber-50 border border-amber-200 rounded-2xl text-xs text-amber-900 leading-relaxed space-y-1">
+                <div className="flex items-center space-x-1.5 space-x-reverse font-bold text-amber-700">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span>کد به اپلیکیشن تلگرام ارسال شد (نه به صورت SMS)</span>
+                </div>
+                <p className="text-[11px] text-amber-800 pr-5">
+                  تلگرام کد تایید ۵ رقمی را مستقیماً به چت رسمی «Telegram» در اپلیکیشن تلگرام فعال شما (در گوشی، تبلت یا کامپیوتر) ارسال نموده است. لطفاً اپ تلگرام خود را باز کرده و کد را در کادر زیر وارد فرمایید.
+                </p>
+              </div>
+            ) : (
+              <div className="p-3 bg-blue-50/70 border border-blue-200 rounded-2xl text-xs text-blue-900 leading-relaxed">
+                📱 کد تایید ۵ رقمی از طریق پیامک (SMS) ارسال شد. لطفاً آن را در کادر زیر وارد نمایید.
+              </div>
+            )}
 
             <div className="space-y-1.5">
               <label className="block text-xs font-bold text-slate-700">
@@ -165,7 +191,7 @@ export const TelegramAuthModal: React.FC<TelegramAuthModalProps> = ({
               <input
                 type="text"
                 value={code}
-                onChange={(e) => setCode(e.target.value)}
+                onChange={(e) => setCode(normalizeDigits(e.target.value))}
                 placeholder="مثال: 12345"
                 className="w-full text-center tracking-[0.5em] text-lg font-mono font-bold bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-slate-900 placeholder-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 transition dir-ltr"
                 maxLength={8}

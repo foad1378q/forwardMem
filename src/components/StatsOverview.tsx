@@ -61,24 +61,42 @@ export const StatsOverview: React.FC<StatsOverviewProps> = ({ stats }) => {
       </div>
 
       {/* Connection Status */}
-      <div className="bg-white/80 backdrop-blur-xl border border-slate-200/80 rounded-2xl p-4 shadow-xl shadow-slate-200/50 flex items-center justify-between transition duration-300 hover:shadow-2xl hover:shadow-amber-500/10">
+      <div className="bg-white/80 backdrop-blur-xl border border-slate-200/80 rounded-2xl p-4 shadow-xl shadow-slate-200/50 flex items-center justify-between transition duration-300 hover:shadow-2xl hover:shadow-blue-500/10">
         <div>
           <span className="text-xs font-semibold text-slate-500 block mb-1">ارتباط GramJS تلگرام</span>
           <div className="flex items-center space-x-1.5 space-x-reverse mt-1">
-            {stats.botStatus === 'connected' ? (
+            {stats.gramStatus === 'connected' && stats.telegramClientConnected ? (
               <>
                 <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-ping" />
                 <span className="text-xs font-bold text-emerald-600">🟢 متصل و آماده</span>
               </>
+            ) : stats.gramStatus === 'connecting' ? (
+              <>
+                <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse" />
+                <span className="text-xs font-bold text-amber-600">🟡 در حال اتصال...</span>
+              </>
+            ) : stats.gramStatus === 'error' ? (
+              <>
+                <span className="w-2.5 h-2.5 rounded-full bg-rose-500" />
+                <span className="text-xs font-bold text-rose-600">🔴 خطای اتصال</span>
+              </>
             ) : (
               <>
-                <span className="w-2.5 h-2.5 rounded-full bg-amber-500" />
-                <span className="text-xs font-bold text-amber-600">🟡 در حال اتصال</span>
+                <span className="w-2.5 h-2.5 rounded-full bg-slate-400" />
+                <span className="text-xs font-bold text-slate-500">⚪ قطع شده (Disconnected)</span>
               </>
             )}
           </div>
         </div>
-        <div className="w-12 h-12 rounded-2xl bg-amber-50 border border-amber-200 flex items-center justify-center text-amber-600 shadow-sm">
+        <div className={`w-12 h-12 rounded-2xl border flex items-center justify-center shadow-sm ${
+          stats.gramStatus === 'connected' && stats.telegramClientConnected
+            ? 'bg-emerald-50 border-emerald-200 text-emerald-600'
+            : stats.gramStatus === 'connecting'
+            ? 'bg-amber-50 border-amber-200 text-amber-600'
+            : stats.gramStatus === 'error'
+            ? 'bg-rose-50 border-rose-200 text-rose-600'
+            : 'bg-slate-50 border-slate-200 text-slate-400'
+        }`}>
           <ShieldCheck className="w-6 h-6" />
         </div>
       </div>

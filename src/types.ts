@@ -13,6 +13,8 @@ export interface TelegramClientConfig {
   connectedPhone?: string;
   lastConnectedAt?: string;
   hasSession?: boolean;
+  isEnvConfigured?: boolean;
+  hasApiCredentials?: boolean;
 }
 
 export interface AiProcessingConfig {

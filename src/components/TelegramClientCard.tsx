@@ -35,19 +35,15 @@ interface TelegramClientCardProps {
   onConfigChange: () => void;
 }
 
-// Default standard Telegram API credentials
-const DEFAULT_API_ID = '2040';
-const DEFAULT_API_HASH = 'b18441a1ed60741557078c33d425e276';
-
 export const TelegramClientCard: React.FC<TelegramClientCardProps> = ({
   clientConfig,
   onConfigChange,
 }) => {
   const [apiId, setApiId] = useState<string>(
-    clientConfig?.apiId ? String(clientConfig.apiId) : DEFAULT_API_ID
+    clientConfig?.apiId ? String(clientConfig.apiId) : ''
   );
   const [apiHash, setApiHash] = useState<string>(
-    clientConfig?.apiHash || DEFAULT_API_HASH
+    clientConfig?.apiHash || ''
   );
   const [phoneNumber, setPhoneNumber] = useState<string>(
     clientConfig?.phoneNumber || ''
@@ -61,6 +57,7 @@ export const TelegramClientCard: React.FC<TelegramClientCardProps> = ({
   // Modal State
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [requiresPassword, setRequiresPassword] = useState(false);
+  const [isCodeViaApp, setIsCodeViaApp] = useState(false);
   const [isExpanded, setIsExpanded] = useState(true);
 
   // Sync state from server ONLY if user is not actively editing inputs
@@ -77,8 +74,14 @@ export const TelegramClientCard: React.FC<TelegramClientCardProps> = ({
 
   const handleConnect = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!apiId.trim() || !apiHash.trim() || !phoneNumber.trim()) {
-      setErrorMsg('لطفاً فیلدهای API ID، API HASH و شماره تلفن را به طور کامل تکمیل نمایید.');
+    const cleanPhone = phoneNumber.trim();
+    if (!cleanPhone) {
+      setErrorMsg('لطفاً شماره تلفن حساب تلگرام را وارد فرمایید.');
+      return;
+    }
+
+    if (!clientConfig?.isEnvConfigured && (!apiId.trim() || !apiHash.trim())) {
+      setErrorMsg('لطفاً فیلدهای API ID و API HASH را وارد نمایید یا در متغیرهای محیطی سرور قرار دهید.');
       return;
     }
 
@@ -87,9 +90,10 @@ export const TelegramClientCard: React.FC<TelegramClientCardProps> = ({
     setSuccessMsg(null);
 
     try {
-      const res = await sendTelegramClientCode(apiId.trim(), apiHash.trim(), phoneNumber.trim());
+      const res = await sendTelegramClientCode(apiId.trim(), apiHash.trim(), cleanPhone);
       if (res.success) {
-        setSuccessMsg('کد تایید ورود به شماره/تلگرام شما ارسال گردید.');
+        setIsCodeViaApp(!!res.isCodeViaApp);
+        setSuccessMsg(res.message || 'کد تایید ورود به شماره/تلگرام شما ارسال گردید.');
         setRequiresPassword(false);
         setIsAuthModalOpen(true);
       } else {
@@ -380,6 +384,13 @@ export const TelegramClientCard: React.FC<TelegramClientCardProps> = ({
       ) : (
         /* Disconnected Form View */
         <form onSubmit={handleConnect} className="space-y-4">
+          {clientConfig?.isEnvConfigured && (
+            <div className="p-3 bg-emerald-50/80 border border-emerald-200 rounded-xl text-xs text-emerald-800 flex items-center space-x-2 space-x-reverse">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+              <span>مقادیر API ID و API HASH از متغیرهای محیطی سرور لود شده‌اند. کافیست شماره تلفن خود را وارد کنید.</span>
+            </div>
+          )}
+
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             {/* API ID */}
             <div className="space-y-1.5">
@@ -394,9 +405,9 @@ export const TelegramClientCard: React.FC<TelegramClientCardProps> = ({
                   setApiId(e.target.value);
                   setIsUserEditing(true);
                 }}
-                placeholder="2040"
+                placeholder="شناسه عددی (مثال: 12345678)"
                 className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 transition dir-ltr font-mono min-w-0"
-                required
+                required={!clientConfig?.isEnvConfigured}
               />
             </div>
 
@@ -413,9 +424,9 @@ export const TelegramClientCard: React.FC<TelegramClientCardProps> = ({
                   setApiHash(e.target.value);
                   setIsUserEditing(true);
                 }}
-                placeholder="b18441a1ed60741557078c33d425e276"
+                placeholder="رشته ۳۲ حرفی معتبر"
                 className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 transition dir-ltr font-mono min-w-0"
-                required
+                required={!clientConfig?.isEnvConfigured}
               />
             </div>
 
@@ -439,9 +450,20 @@ export const TelegramClientCard: React.FC<TelegramClientCardProps> = ({
             </div>
           </div>
 
-          <div className="text-xs text-slate-500 flex items-center space-x-2 space-x-reverse">
-            <span className="text-blue-600 font-bold">راهنما:</span>
-            <span>با کلیک روی «اتصال تلگرام»، کد ۵ رقمی تایید تلگرام ارسال خواهد شد.</span>
+          <div className="text-xs text-slate-500 flex flex-wrap items-center justify-between gap-2 pt-1">
+            <div className="flex items-center space-x-1.5 space-x-reverse">
+              <span className="text-blue-600 font-bold">راهنما:</span>
+              <span>کد ۵ رقمی تایید به تلگرام شما ارسال خواهد شد.</span>
+            </div>
+            <a
+              href="https://my.telegram.org"
+              target="_blank"
+              rel="noreferrer"
+              className="text-[11px] text-blue-600 hover:text-blue-800 font-bold hover:underline inline-flex items-center space-x-1 space-x-reverse"
+            >
+              <span>دریافت API_ID و API_HASH از my.telegram.org</span>
+              <span>↗</span>
+            </a>
           </div>
 
           {/* Buttons */}
@@ -485,6 +507,7 @@ export const TelegramClientCard: React.FC<TelegramClientCardProps> = ({
         onClose={() => setIsAuthModalOpen(false)}
         phoneNumber={phoneNumber}
         initialRequiresPassword={requiresPassword}
+        isCodeViaApp={isCodeViaApp}
         onSuccess={(newConfig) => {
           setSuccessMsg('🟢 کلاینت تلگرام با موفقیت متصل گردید!');
           onConfigChange();

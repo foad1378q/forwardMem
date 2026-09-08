@@ -40,8 +40,8 @@ export const SetupWizardModal: React.FC<SetupWizardModalProps> = ({ isOpen, onCl
   const [botToken, setBotToken] = useState<string>('');
   const [destinationChannel, setDestinationChannel] = useState<string>('');
   const [databaseUrl, setDatabaseUrl] = useState<string>('');
-  const [apiId, setApiId] = useState<string>('2040');
-  const [apiHash, setApiHash] = useState<string>('b18441a1ed60741557078c33d425e276');
+  const [apiId, setApiId] = useState<string>('');
+  const [apiHash, setApiHash] = useState<string>('');
   const [adminPassword, setAdminPassword] = useState<string>('admin123');
 
   // Load current setup status when opened
@@ -127,8 +127,8 @@ export const SetupWizardModal: React.FC<SetupWizardModalProps> = ({ isOpen, onCl
       const payload = {
         botToken: botToken.trim(),
         destinationChannel: destinationChannel.trim(),
-        apiId: apiId.trim() ? Number(apiId.trim()) : 2040,
-        apiHash: apiHash.trim() || 'b18441a1ed60741557078c33d425e276',
+        apiId: apiId.trim() ? Number(apiId.trim()) : null,
+        apiHash: apiHash.trim() || '',
         databaseUrl: databaseUrl.trim(),
         adminPassword: adminPassword.trim() || 'admin123',
       };

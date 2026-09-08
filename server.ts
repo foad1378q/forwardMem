@@ -46,6 +46,7 @@ import { createServer as createViteServer } from "vite";
 import { TelegramClient, Api } from "telegram";
 import { StringSession } from "telegram/sessions/index.js";
 import { NewMessage, NewMessageEvent } from "telegram/events/index.js";
+import { computeCheck } from "telegram/Password.js";
 import { defaultRewriteService, RewriteOptions } from "./server/services/ai/index.js";
 import {
   AdminConfig,
@@ -249,9 +250,137 @@ const PORT = Number(process.env.PORT) || 3000;
 const DATA_DIR = path.join(process.cwd(), "data");
 const STORE_FILE = path.join(DATA_DIR, "forwarder_store.json");
 
-// Default GramJS Public API Credentials (standard Telegram API ID/Hash)
-const DEFAULT_API_ID = 2040;
-const DEFAULT_API_HASH = "b18441a1ed60741557078c33d425e276";
+// Helper to normalize international phone numbers (e.g. converting Persian/Arabic digits, standardizing + prefix)
+export function normalizeTelegramPhoneNumber(phone: string): string {
+  if (!phone) return "";
+  const persianDigits = ['۰', '۱', '۲', '۳', '۴', '۵', '۶', '۷', '۸', '۹'];
+  const arabicDigits = ['٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩'];
+  let clean = String(phone).trim();
+  for (let i = 0; i < 10; i++) {
+    clean = clean.replace(new RegExp(persianDigits[i], 'g'), i.toString());
+    clean = clean.replace(new RegExp(arabicDigits[i], 'g'), i.toString());
+  }
+  // Strip whitespace, hyphens, dots, parentheses
+  clean = clean.replace(/[\s\-\(\)\.]/g, '');
+
+  if (clean.startsWith('00')) {
+    clean = '+' + clean.slice(2);
+  } else if (clean.startsWith('09') && clean.length === 11) {
+    clean = '+98' + clean.slice(1);
+  } else if (clean.startsWith('9') && clean.length === 10) {
+    clean = '+98' + clean;
+  } else if (!clean.startsWith('+')) {
+    clean = '+' + clean;
+  }
+  return clean;
+}
+
+// Telegram RPC Error parser with specific Persian user-friendly messages
+export function formatTelegramRpcError(err: any): { code: string; message: string; isAppCode?: boolean; floodWaitSeconds?: number } {
+  const rawMsg = String(err?.message || err?.errorMessage || err?.description || err || "").toUpperCase();
+  console.error("🔍 [TELEGRAM RPC ERROR ANALYSIS]:", { rawMsg, errName: err?.name, fullErr: err });
+
+  // Flood wait handling
+  if (rawMsg.includes("FLOOD_WAIT")) {
+    const match = rawMsg.match(/FLOOD_WAIT_?(\d+)/i) || String(err?.seconds || "").match(/(\d+)/);
+    const seconds = match ? parseInt(match[1], 10) : (typeof err?.seconds === "number" ? err.seconds : 60);
+    return {
+      code: "FLOOD_WAIT",
+      message: `تلگرام به دلیل ارسال مکرر درخواست، این حساب یا آدرس IP را به مدت ${seconds} ثانیه محدود کرده است. لطفاً تا اتمام زمان صبر فرمایید.`,
+      floodWaitSeconds: seconds,
+    };
+  }
+
+  if (rawMsg.includes("API_ID_INVALID")) {
+    return {
+      code: "API_ID_INVALID",
+      message: "شناسه API ID یا API HASH وارد شده نامعتبر است. لطفاً این مقادیر را از سایت my.telegram.org دریافت و به دقت وارد نمایید.",
+    };
+  }
+
+  if (rawMsg.includes("API_ID_PUBLISHED_FLOOD")) {
+    return {
+      code: "API_ID_PUBLISHED_FLOOD",
+      message: "این API ID عمومی شده و توسط تلگرام مسدود شده است. لطفاً از my.telegram.org یک API ID و API HASH اختصاصی ایجاد کرده و وارد کنید.",
+    };
+  }
+
+  if (rawMsg.includes("PHONE_NUMBER_INVALID")) {
+    return {
+      code: "PHONE_NUMBER_INVALID",
+      message: "شماره تلفن وارد شده نامعتبر است. لطفاً شماره را با فرمت بین‌المللی وارد فرمایید (مثال: +989123456789).",
+    };
+  }
+
+  if (rawMsg.includes("PHONE_NUMBER_FLOOD")) {
+    return {
+      code: "PHONE_NUMBER_FLOOD",
+      message: "به دلیل درخواست‌های مکرر و ناموفق، این شماره موقتاً توسط تلگرام محدود شده است. لطفاً چند ساعت بعد دوباره تلاش فرمایید.",
+    };
+  }
+
+  if (rawMsg.includes("PHONE_PASSWORD_FLOOD")) {
+    return {
+      code: "PHONE_PASSWORD_FLOOD",
+      message: "تلاش‌های ورود به دلیل وارد کردن مکرر رمز عبور اشتباه مسدود گردیده است. لطفاً مدتی صبر کرده و سپس اقدام فرمایید.",
+    };
+  }
+
+  if (rawMsg.includes("PHONE_PASSWORD_PROTECTED")) {
+    return {
+      code: "PHONE_PASSWORD_PROTECTED",
+      message: "این حساب تلگرام دارای تایید دو مرحله‌ای است و رمز عبور الزامی می‌باشد.",
+    };
+  }
+
+  if (rawMsg.includes("SESSION_PASSWORD_NEEDED")) {
+    return {
+      code: "SESSION_PASSWORD_NEEDED",
+      message: "این حساب دارای تایید دو مرحله‌ای (Two-Step Verification) است. لطفاً رمز عبور دوم خود را وارد نمایید.",
+    };
+  }
+
+  if (rawMsg.includes("PHONE_CODE_INVALID")) {
+    return {
+      code: "PHONE_CODE_INVALID",
+      message: "کد تایید ۵ رقمی وارد شده اشتباه است. لطفاً کد جدید دریافتی در اپلیکیشن تلگرام را بررسی و وارد نمایید.",
+    };
+  }
+
+  if (rawMsg.includes("PHONE_CODE_EXPIRED")) {
+    return {
+      code: "PHONE_CODE_EXPIRED",
+      message: "کد تایید منقضی شده است. لطفاً مجدداً دکمه ارسال کد را فشار دهید.",
+    };
+  }
+
+  if (rawMsg.includes("SMS_CODE_CREATE_FAILED")) {
+    return {
+      code: "SMS_CODE_CREATE_FAILED",
+      message: "امکان ارسال پیامک وجود ندارد. تلگرام کد تایید را به اپلیکیشن فعال تلگرام شما ارسال کرده است؛ لطفاً چت رسمی Telegram در اپ تلگرام را بررسی فرمایید.",
+      isAppCode: true,
+    };
+  }
+
+  if (rawMsg.includes("AUTH_RESTART")) {
+    return {
+      code: "AUTH_RESTART",
+      message: "نشست احراز هویت ری‌استارت شد یا منقضی گردیده است. لطفاً مجدداً شماره را ارسال کرده و کد جدید دریافت نمایید.",
+    };
+  }
+
+  if (rawMsg.includes("ETIMEDOUT") || rawMsg.includes("ECONNREFUSED") || rawMsg.includes("TIMEOUT") || rawMsg.includes("NETWORK")) {
+    return {
+      code: "NETWORK_ERROR",
+      message: "خطای ارتباط شبکه با سرورهای تلگرام. اتصال اینترنت یا فایروال سرور را بررسی فرمایید.",
+    };
+  }
+
+  return {
+    code: "UNKNOWN_TELEGRAM_ERROR",
+    message: err?.message || err?.errorMessage || "خطای نامشخص در ارتباط با سرورهای تلگرام رخ داد.",
+  };
+}
 
 // Memory Data Structure
 interface DataStore {
@@ -275,8 +404,8 @@ interface DataStore {
 let store: DataStore = {
   adminPasswordHash: "admin123",
   telegramClientConfig: {
-    apiId: DEFAULT_API_ID,
-    apiHash: DEFAULT_API_HASH,
+    apiId: process.env.API_ID ? parseInt(process.env.API_ID, 10) : null,
+    apiHash: (process.env.API_HASH && process.env.API_HASH.trim()) || "",
     phoneNumber: "",
     session: "",
     isConnected: false,
@@ -322,6 +451,8 @@ let pendingAuthData: {
   apiHash: string;
   phoneNumber: string;
   phoneCodeHash: string;
+  isCodeViaApp?: boolean;
+  timestamp?: number;
 } | null = null;
 
 // Persistence Helpers
@@ -522,45 +653,71 @@ async function initGramJS() {
 
   try {
     const sessionStr = store.telegramClientConfig?.session || store.telegramSession || "";
-    const apiId = process.env.API_ID ? parseInt(process.env.API_ID, 10) : (store.telegramClientConfig?.apiId || DEFAULT_API_ID);
-    const apiHash = (process.env.API_HASH && process.env.API_HASH.trim()) ? process.env.API_HASH.trim() : (store.telegramClientConfig?.apiHash || DEFAULT_API_HASH);
+    const envApiId = process.env.API_ID ? parseInt(process.env.API_ID, 10) : null;
+    const envApiHash = process.env.API_HASH && process.env.API_HASH.trim() ? process.env.API_HASH.trim() : null;
 
-    if (sessionStr) {
-      const stringSession = new StringSession(sessionStr);
-      gramClient = new TelegramClient(stringSession, apiId, apiHash, {
-        connectionRetries: 10,
-        useWSS: false,
-      });
+    const apiId = envApiId || store.telegramClientConfig?.apiId;
+    const apiHash = envApiHash || store.telegramClientConfig?.apiHash;
 
-      await gramClient.connect();
-
-      const me = await gramClient.getMe().catch((err) => {
-        console.error("[TELEGRAM CLIENT] Could not fetch account info:", err?.message || err);
-        return null;
-      });
-
-      if (me) {
-        gramStatus = 'connected';
-        if (store.telegramClientConfig) store.telegramClientConfig.isConnected = true;
-        if ((me as any).phone && store.telegramClientConfig) {
-          store.telegramClientConfig.connectedPhone = '+' + (me as any).phone;
-        }
-        if (store.telegramClientConfig && !store.telegramClientConfig.lastConnectedAt) {
-          store.telegramClientConfig.lastConnectedAt = new Date().toISOString();
-        }
-        saveStore();
-        console.log("✅ GramJS Telegram User Client connected successfully! Account:", (me as any).firstName || (me as any).username || "User");
-
-        await initializeSourceListeners();
-        return;
-      }
+    if (!sessionStr) {
+      gramStatus = 'disconnected';
+      if (store.telegramClientConfig) store.telegramClientConfig.isConnected = false;
+      return;
     }
 
-    gramStatus = 'disconnected';
-    if (store.telegramClientConfig) store.telegramClientConfig.isConnected = false;
+    if (!apiId || isNaN(Number(apiId)) || Number(apiId) === 2040 || !apiHash) {
+      console.warn("⚠️ GramJS: Valid API_ID and API_HASH are required to initialize GramJS (test ID 2040 is rejected).");
+      gramStatus = 'disconnected';
+      if (store.telegramClientConfig) store.telegramClientConfig.isConnected = false;
+      return;
+    }
+
+    const stringSession = new StringSession(sessionStr);
+    gramClient = new TelegramClient(stringSession, Number(apiId), String(apiHash).trim(), {
+      connectionRetries: 5,
+      useWSS: false,
+      timeout: 15000,
+    });
+
+    await gramClient.connect();
+
+    const me = await gramClient.getMe().catch((err) => {
+      console.error("[TELEGRAM CLIENT] Could not fetch account info:", err?.message || err);
+      return null;
+    });
+
+    if (me) {
+      gramStatus = 'connected';
+      if (store.telegramClientConfig) {
+        store.telegramClientConfig.isConnected = true;
+        if ((me as any).phone) {
+          store.telegramClientConfig.connectedPhone = '+' + (me as any).phone;
+        }
+        if (!store.telegramClientConfig.lastConnectedAt) {
+          store.telegramClientConfig.lastConnectedAt = new Date().toISOString();
+        }
+      }
+      await saveStore();
+      console.log("✅ GramJS Telegram User Client connected successfully! Account:", (me as any).firstName || (me as any).username || "User");
+
+      await initializeSourceListeners();
+      return;
+    } else {
+      console.warn("⚠️ GramJS: Connected to network but session could not be verified with getMe(). Disconnecting.");
+      gramStatus = 'disconnected';
+      if (store.telegramClientConfig) store.telegramClientConfig.isConnected = false;
+      if (gramClient) {
+        try { await gramClient.disconnect(); } catch (_) {}
+        gramClient = null;
+      }
+    }
   } catch (err: any) {
     gramStatus = 'error';
     if (store.telegramClientConfig) store.telegramClientConfig.isConnected = false;
+    if (gramClient) {
+      try { await gramClient.disconnect(); } catch (_) {}
+      gramClient = null;
+    }
     console.error("❌ GramJS User Client connection error (handled):", err?.message || err);
   }
 }
@@ -2011,9 +2168,9 @@ async function startServer() {
       databaseType: isDbConnected ? "postgresql" : "local_storage",
       destinationChannel: store.settings.destinationChannel || "",
       botUsername: store.settings.botUsername || "",
-      apiId: store.telegramClientConfig?.apiId || DEFAULT_API_ID,
-      apiHash: store.telegramClientConfig?.apiHash || DEFAULT_API_HASH,
-      isTelegramClientConnected: gramStatus === "connected" || !!store.telegramClientConfig?.isConnected,
+      apiId: (process.env.API_ID ? parseInt(process.env.API_ID, 10) : store.telegramClientConfig?.apiId) || null,
+      apiHash: (process.env.API_HASH && process.env.API_HASH.trim()) || store.telegramClientConfig?.apiHash || "",
+      isTelegramClientConnected: gramStatus === "connected" && !!gramClient,
       lastBackupTime: store.stats?.lastBackupTime || null,
     });
   });
@@ -2113,7 +2270,16 @@ async function startServer() {
 
     if (apiId || apiHash) {
       if (!store.telegramClientConfig) {
-        store.telegramClientConfig = { apiId: DEFAULT_API_ID, apiHash: DEFAULT_API_HASH, phoneNumber: "", isConnected: false };
+        store.telegramClientConfig = {
+          apiId: process.env.API_ID ? parseInt(process.env.API_ID, 10) : null,
+          apiHash: (process.env.API_HASH && process.env.API_HASH.trim()) || "",
+          phoneNumber: "",
+          session: "",
+          isConnected: false,
+          isMonitoringPaused: false,
+          connectedPhone: "",
+          lastConnectedAt: "",
+        };
       }
       if (apiId) store.telegramClientConfig.apiId = Number(apiId);
       if (apiHash) store.telegramClientConfig.apiHash = String(apiHash).trim();
@@ -2188,16 +2354,25 @@ async function startServer() {
 
   // Get Telegram Client Connection Status
   app.get("/api/telegram-client/status", (req, res) => {
-    const isClientConn = gramStatus === 'connected' || !!store.telegramClientConfig?.isConnected;
+    const isClientConn = gramStatus === 'connected' && !!gramClient;
+    const envApiId = process.env.API_ID ? parseInt(process.env.API_ID, 10) : null;
+    const envApiHash = process.env.API_HASH && process.env.API_HASH.trim() ? process.env.API_HASH.trim() : null;
+    const isEnvConfigured = !!(envApiId && envApiHash && envApiId !== 2040);
+
+    const resolvedApiId = envApiId || store.telegramClientConfig?.apiId || null;
+    const resolvedApiHash = envApiHash || store.telegramClientConfig?.apiHash || "";
+
     res.json({
       clientConfig: {
-        apiId: store.telegramClientConfig?.apiId || null,
-        apiHash: store.telegramClientConfig?.apiHash || "",
+        apiId: resolvedApiId && resolvedApiId !== 2040 ? resolvedApiId : null,
+        apiHash: resolvedApiHash && resolvedApiId !== 2040 ? resolvedApiHash : "",
         phoneNumber: store.telegramClientConfig?.phoneNumber || "",
         isConnected: isClientConn,
         connectedPhone: store.telegramClientConfig?.connectedPhone || store.telegramClientConfig?.phoneNumber || "",
         lastConnectedAt: store.telegramClientConfig?.lastConnectedAt || "",
         hasSession: !!(store.telegramClientConfig?.session || store.telegramSession),
+        isEnvConfigured,
+        hasApiCredentials: isEnvConfigured || (!!store.telegramClientConfig?.apiId && !!store.telegramClientConfig?.apiHash && store.telegramClientConfig.apiId !== 2040),
       },
       gramStatus,
     });
@@ -2207,21 +2382,48 @@ async function startServer() {
   app.post("/api/telegram-client/send-code", async (req, res) => {
     const { apiId, apiHash, phoneNumber } = req.body;
 
-    if (!apiId || !apiHash || !phoneNumber) {
+    const envApiId = process.env.API_ID ? parseInt(process.env.API_ID, 10) : null;
+    const envApiHash = process.env.API_HASH && process.env.API_HASH.trim() ? process.env.API_HASH.trim() : null;
+
+    // Prioritize explicit input, then env, then store
+    const resolvedApiId = (apiId !== undefined && apiId !== null && String(apiId).trim() !== "")
+      ? parseInt(String(apiId).trim(), 10)
+      : (envApiId || store.telegramClientConfig?.apiId);
+
+    const resolvedApiHash = (apiHash !== undefined && apiHash !== null && String(apiHash).trim() !== "")
+      ? String(apiHash).trim()
+      : (envApiHash || store.telegramClientConfig?.apiHash);
+
+    if (!resolvedApiId || isNaN(resolvedApiId) || resolvedApiId <= 0) {
       return res.status(400).json({
         success: false,
-        message: "لطفاً تمامی فیلدها شامل API ID، API HASH و شماره تلفن را وارد کنید.",
+        errorCode: "API_ID_INVALID",
+        message: "شناسه API ID نامعتبر است. لطفاً یک عدد صحیح معتبر وارد کنید یا در متغیرهای محیطی قرار دهید.",
       });
     }
 
-    const parsedApiId = parseInt(apiId, 10);
-    const cleanApiHash = String(apiHash).trim();
-    const cleanPhone = String(phoneNumber).trim().replace(/\s+/g, "");
-
-    if (isNaN(parsedApiId) || !cleanApiHash || !cleanPhone) {
+    if (resolvedApiId === 2040) {
       return res.status(400).json({
         success: false,
-        message: "اطلاعات API ID، API HASH یا شماره تلفن نامعتبر است.",
+        errorCode: "API_ID_PUBLISHED_FLOOD",
+        message: "شناسه پیش‌فرض 2040 توسط تلگرام مسدود شده است. لطفاً شناسه اختصاصی خود را از my.telegram.org دریافت و وارد کنید.",
+      });
+    }
+
+    if (!resolvedApiHash || resolvedApiHash.length < 10) {
+      return res.status(400).json({
+        success: false,
+        errorCode: "API_HASH_INVALID",
+        message: "مقدار API HASH نامعتبر است. لطفاً کد ۳۲ حرفی معتبر را از my.telegram.org دریافت و وارد فرمایید.",
+      });
+    }
+
+    const cleanPhone = normalizeTelegramPhoneNumber(phoneNumber);
+    if (!cleanPhone || cleanPhone.length < 8 || !/^\+[1-9]\d{6,14}$/.test(cleanPhone)) {
+      return res.status(400).json({
+        success: false,
+        errorCode: "PHONE_NUMBER_INVALID",
+        message: "شماره تلفن وارد شده نامعتبر است. شماره را با کد کشور بین‌المللی (مثال: +989123456789) وارد نمایید.",
       });
     }
 
@@ -2231,39 +2433,56 @@ async function startServer() {
         pendingAuthClient = null;
       }
 
+      console.log(`📡 [TELEGRAM CLIENT AUTH] Initiating connection for ${cleanPhone} (API_ID: ${resolvedApiId})...`);
       const session = new StringSession("");
-      pendingAuthClient = new TelegramClient(session, parsedApiId, cleanApiHash, {
+      pendingAuthClient = new TelegramClient(session, resolvedApiId, resolvedApiHash, {
         connectionRetries: 3,
         useWSS: false,
+        timeout: 20000,
       });
 
       await pendingAuthClient.connect();
 
       const sendRes = await pendingAuthClient.sendCode(
-        { apiId: parsedApiId, apiHash: cleanApiHash },
+        { apiId: resolvedApiId, apiHash: resolvedApiHash },
         cleanPhone
       );
 
+      const isViaApp = !!(sendRes as any)?.isCodeViaApp;
+
       pendingAuthData = {
-        apiId: parsedApiId,
-        apiHash: cleanApiHash,
+        apiId: resolvedApiId,
+        apiHash: resolvedApiHash,
         phoneNumber: cleanPhone,
         phoneCodeHash: sendRes.phoneCodeHash,
+        isCodeViaApp: isViaApp,
+        timestamp: Date.now(),
       };
 
-      addLog("system", "system", "کلاینت تلگرام", 0, "config", "success", `کد تایید ورود به شماره ${cleanPhone} ارسال گردید.`);
+      addLog("system", "system", "کلاینت تلگرام", 0, "config", "success", `کد تایید ورود به شماره ${cleanPhone} ارسال گردید (${isViaApp ? "ارسال درون‌برنامه‌ای به تلگرام" : "ارسال پیامکی"}).`);
 
       res.json({
         success: true,
-        message: "کد تایید ورود به حساب تلگرام شما (یا اپلیکیشن تلگرام) ارسال گردید.",
+        message: isViaApp
+          ? "کد تایید به اپلیکیشن فعال تلگرام شما ارسال شد. لطفاً چت رسمی Telegram در اپلیکیشن تلگرام را بررسی فرمایید."
+          : `کد تایید ورود به تلگرام برای شماره ${cleanPhone} ارسال گردید.`,
         phoneCodeHash: sendRes.phoneCodeHash,
         phoneNumber: cleanPhone,
+        isCodeViaApp: isViaApp,
       });
     } catch (err: any) {
-      console.error("sendCode error:", err);
+      console.error("❌ [TELEGRAM CLIENT sendCode error]:", err);
+      if (pendingAuthClient) {
+        try { await pendingAuthClient.disconnect(); } catch (_) {}
+        pendingAuthClient = null;
+      }
+      const formatted = formatTelegramRpcError(err);
       res.status(400).json({
         success: false,
-        message: `خطا در ارسال کد تایید تلگرام: ${err.message || err.errorMessage || "پاسخی از سرور تلگرام دریافت نشد."}`,
+        errorCode: formatted.code,
+        message: formatted.message,
+        isCodeViaApp: formatted.isAppCode,
+        floodWaitSeconds: formatted.floodWaitSeconds,
       });
     }
   });
@@ -2275,11 +2494,12 @@ async function startServer() {
     if (!phoneCode || !pendingAuthClient || !pendingAuthData) {
       return res.status(400).json({
         success: false,
-        message: "درخواست نامعتبر است یا جلسه ارسال کد منقضی شده است. لطفاً مجدداً تلاش نمایید.",
+        errorCode: "AUTH_SESSION_EXPIRED",
+        message: "درخواست نامعتبر است یا زمان جلسه منقضی شده است. لطفاً مجدداً شماره را ارسال نمایید.",
       });
     }
 
-    const cleanCode = String(phoneCode).trim();
+    const cleanCode = normalizeTelegramPhoneNumber(phoneCode).replace(/\D/g, "");
 
     try {
       await pendingAuthClient.invoke(
@@ -2302,9 +2522,10 @@ async function startServer() {
         isConnected: true,
         connectedPhone: me && (me as any).phone ? '+' + (me as any).phone : pendingAuthData.phoneNumber,
         lastConnectedAt: new Date().toISOString(),
+        isMonitoringPaused: false,
       };
       store.telegramSession = sessionStr;
-      saveStore();
+      await saveStore();
 
       gramClient = pendingAuthClient;
       gramStatus = 'connected';
@@ -2313,25 +2534,36 @@ async function startServer() {
 
       addLog("system", "system", "کلاینت تلگرام", 0, "config", "success", `کلاینت تلگرام با شماره ${store.telegramClientConfig.connectedPhone} با موفقیت متصل شد.`);
 
+      initializeSourceListeners().catch((err) => {
+        console.error("Error initializing source listeners after login:", err);
+      });
+
       res.json({
         success: true,
         message: "🟢 ورود و اتصال کلاینت تلگرام با موفقیت انجام شد!",
-        clientConfig: store.telegramClientConfig,
+        clientConfig: {
+          ...store.telegramClientConfig,
+          isConnected: true,
+          hasSession: true,
+        },
       });
     } catch (err: any) {
       console.error("verifyCode error:", err);
-      const errMsg = err.message || err.errorMessage || "";
-      if (errMsg.includes("SESSION_PASSWORD_NEEDED")) {
+      const rawMsg = String(err?.message || err?.errorMessage || "");
+      if (rawMsg.includes("SESSION_PASSWORD_NEEDED")) {
         return res.json({
           success: false,
           requiresPassword: true,
+          errorCode: "SESSION_PASSWORD_NEEDED",
           message: "این حساب تلگرام دارای تایید دو مرحله‌ای (Two-Step Verification) است. لطفاً رمز عبور را وارد نمایید.",
         });
       }
 
+      const formatted = formatTelegramRpcError(err);
       res.status(400).json({
         success: false,
-        message: `کد تایید وارد شده اشتباه یا منقضی است: ${errMsg}`,
+        errorCode: formatted.code,
+        message: formatted.message,
       });
     }
   });
@@ -2343,7 +2575,8 @@ async function startServer() {
     if (!password || !pendingAuthClient || !pendingAuthData) {
       return res.status(400).json({
         success: false,
-        message: "درخواست نامعتبر است یا جلسه احراز هویت منقضی شده است.",
+        errorCode: "AUTH_SESSION_EXPIRED",
+        message: "درخواست نامعتبر است یا جلسه احراز هویت منقضی شده است. لطفاً مجدداً شماره را وارد کنید.",
       });
     }
 
@@ -2351,7 +2584,7 @@ async function startServer() {
 
     try {
       const passwordInfo = await pendingAuthClient.invoke(new Api.account.GetPassword());
-      const checkPassword = await (pendingAuthClient as any).computeCheckPassword(passwordInfo, cleanPassword);
+      const checkPassword = await computeCheck(passwordInfo, cleanPassword);
       await pendingAuthClient.invoke(new Api.auth.CheckPassword({ password: checkPassword }));
 
       const sessionStr = pendingAuthClient.session.save() as unknown as string;
@@ -2365,9 +2598,10 @@ async function startServer() {
         isConnected: true,
         connectedPhone: me && (me as any).phone ? '+' + (me as any).phone : pendingAuthData.phoneNumber,
         lastConnectedAt: new Date().toISOString(),
+        isMonitoringPaused: false,
       };
       store.telegramSession = sessionStr;
-      saveStore();
+      await saveStore();
 
       gramClient = pendingAuthClient;
       gramStatus = 'connected';
@@ -2376,16 +2610,26 @@ async function startServer() {
 
       addLog("system", "system", "کلاینت تلگرام", 0, "config", "success", `تایید دو مرحله‌ای انجام شد و کلاینت تلگرام (${store.telegramClientConfig.connectedPhone}) با موفقیت متصل گردید.`);
 
+      initializeSourceListeners().catch((err) => {
+        console.error("Error initializing source listeners after 2FA login:", err);
+      });
+
       res.json({
         success: true,
         message: "🟢 تایید دو مرحله‌ای موفقیت‌آمیز بود و کلاینت تلگرام متصل شد!",
-        clientConfig: store.telegramClientConfig,
+        clientConfig: {
+          ...store.telegramClientConfig,
+          isConnected: true,
+          hasSession: true,
+        },
       });
     } catch (err: any) {
       console.error("verifyPassword error:", err);
+      const formatted = formatTelegramRpcError(err);
       res.status(400).json({
         success: false,
-        message: `رمز عبور دو مرحله‌ای اشتباه است: ${err.message || err.errorMessage || "خطا در بررسی رمز"}`,
+        errorCode: formatted.code,
+        message: `رمز عبور دو مرحله‌ای اشتباه است: ${formatted.message}`,
       });
     }
   });
@@ -2398,17 +2642,21 @@ async function startServer() {
         gramClient = null;
       }
       gramStatus = 'disconnected';
+      const envApiId = process.env.API_ID ? parseInt(process.env.API_ID, 10) : null;
+      const envApiHash = (process.env.API_HASH && process.env.API_HASH.trim()) || "";
+
       store.telegramClientConfig = {
-        apiId: null,
-        apiHash: "",
+        apiId: envApiId && envApiId !== 2040 ? envApiId : null,
+        apiHash: envApiHash && envApiId !== 2040 ? envApiHash : "",
         phoneNumber: "",
         session: "",
         isConnected: false,
         connectedPhone: "",
         lastConnectedAt: "",
+        isMonitoringPaused: false,
       };
       store.telegramSession = "";
-      saveStore();
+      await saveStore();
 
       addLog("system", "system", "کلاینت تلگرام", 0, "config", "success", "ارتباط کلاینت تلگرام قطع گردید.");
 
@@ -2458,9 +2706,9 @@ async function startServer() {
         if (me) {
           return res.json({
             success: true,
-            message: `تست اتصال کلاینت با موفقیت انجام شد! حساب متصل: ${(me as any).firstName} (@${(me as any).username || 'بدون آیدی'}) - شماره: +${(me as any).phone || store.telegramClientConfig.connectedPhone}`,
+            message: `تست اتصال کلاینت با موفقیت انجام شد! حساب متصل: ${(me as any).firstName || 'کاربر'} (@${(me as any).username || 'بدون آیدی'}) - شماره: +${(me as any).phone || store.telegramClientConfig?.connectedPhone || ''}`,
             user: {
-              id: (me as any).id,
+              id: (me as any).id?.toString(),
               firstName: (me as any).firstName,
               username: (me as any).username,
               phone: (me as any).phone,
@@ -2477,6 +2725,12 @@ async function startServer() {
           return res.json({
             success: true,
             message: `تست اتصال کلاینت با موفقیت انجام شد! حساب متصل: ${me ? (me as any).firstName : 'فعال'}`,
+            user: me ? {
+              id: (me as any).id?.toString(),
+              firstName: (me as any).firstName,
+              username: (me as any).username,
+              phone: (me as any).phone,
+            } : undefined,
           });
         }
       }
@@ -3482,10 +3736,14 @@ async function startServer() {
     const activeCount = store.sources.filter((s) => s.status === "active").length;
     const uptime = Math.floor((Date.now() - new Date(store.stats.startTime).getTime()) / 1000);
 
-    const isClientConnected = gramStatus === 'connected' || !!store.telegramClientConfig?.isConnected || !!(store.telegramClientConfig?.session || store.telegramSession);
+    const isClientConnected = gramStatus === 'connected' && !!gramClient;
     const isBotConnected = store.settings.isVerified && !!store.settings.botToken;
     const isDestVerified = store.settings.isVerified && !!store.settings.destinationChannel;
     const isReady = isClientConnected && isBotConnected && isDestVerified;
+
+    const envApiId = process.env.API_ID ? parseInt(process.env.API_ID, 10) : null;
+    const envApiHash = process.env.API_HASH && process.env.API_HASH.trim() ? process.env.API_HASH.trim() : null;
+    const isEnvConfigured = !!(envApiId && envApiHash && envApiId !== 2040);
 
     const filteredCount = store.logs.filter((l) => l.status === "skipped" || l.status === "duplicate").length;
     const errorCount = store.logs.filter((l) => l.status === "error").length;
@@ -3509,14 +3767,16 @@ async function startServer() {
       destinationVerified: isDestVerified,
       systemReady: isReady,
       clientConfig: {
-        apiId: store.telegramClientConfig?.apiId,
-        apiHash: store.telegramClientConfig?.apiHash,
+        apiId: (envApiId || store.telegramClientConfig?.apiId) && (envApiId || store.telegramClientConfig?.apiId) !== 2040 ? (envApiId || store.telegramClientConfig?.apiId) : null,
+        apiHash: envApiHash || store.telegramClientConfig?.apiHash || "",
         phoneNumber: store.telegramClientConfig?.phoneNumber,
         isConnected: isClientConnected,
         isMonitoringPaused: !!store.isMonitoringPaused,
         connectedPhone: store.telegramClientConfig?.connectedPhone || store.telegramClientConfig?.phoneNumber || "",
         lastConnectedAt: store.telegramClientConfig?.lastConnectedAt || "",
         hasSession: !!(store.telegramClientConfig?.session || store.telegramSession),
+        isEnvConfigured,
+        hasApiCredentials: isEnvConfigured || (!!store.telegramClientConfig?.apiId && !!store.telegramClientConfig?.apiHash && store.telegramClientConfig.apiId !== 2040),
       },
     };
 
