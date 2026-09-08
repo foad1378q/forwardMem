@@ -11,6 +11,8 @@ import {
   Layers,
   Lock,
   MessageSquareCode,
+  Clock,
+  ShieldAlert,
 } from 'lucide-react';
 
 export interface NavSection {
@@ -23,11 +25,13 @@ export interface NavSection {
 }
 
 export const NAV_SECTIONS: NavSection[] = [
-  { id: 'stats-overview', label: 'آمار کلی', shortLabel: 'آمار', icon: BarChart3 },
+  { id: 'stats-overview', label: 'داشبورد مانیتورینگ', shortLabel: 'داشبورد', icon: BarChart3 },
+  { id: 'queue-management-card', label: 'صف و ارسال هوشمند', shortLabel: 'صف ارسال', icon: Clock },
+  { id: 'report-group-card', label: 'گروه گزارش و هشدار', shortLabel: 'گروه گزارش', icon: ShieldAlert },
   { id: 'telegram-client-card', label: 'حساب تلگرام', shortLabel: 'اکانت', icon: Smartphone },
   { id: 'bot-setup-card', label: 'تنظیمات ربات', shortLabel: 'ربات', icon: Bot },
   { id: 'in-bot-admin-card', label: 'مدیریت از داخل ربات', shortLabel: 'مدیریت ربات', icon: MessageSquareCode },
-  { id: 'ai-processing-center-card', label: 'پردازش هوشمند', shortLabel: 'پردازش', icon: Cpu },
+  { id: 'ai-processing-center-card', label: 'مرکز پردازش و فیلتر', shortLabel: 'فیلترها', icon: Cpu },
   { id: 'sources-table', label: 'کانال‌های مبدا', shortLabel: 'کانال‌ها', icon: Radio },
   { id: 'logs-panel', label: 'گزارشات لاگ', shortLabel: 'لاگ‌ها', icon: FileText },
   { id: 'database-management-card', label: 'پشتیبان‌گیری', shortLabel: 'پشتیبان', icon: HardDrive, requiresAdmin: true },

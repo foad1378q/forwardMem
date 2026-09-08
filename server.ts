@@ -47,7 +47,8 @@ import { TelegramClient, Api } from "telegram";
 import { StringSession } from "telegram/sessions/index.js";
 import { NewMessage, NewMessageEvent } from "telegram/events/index.js";
 import { computeCheck } from "telegram/Password.js";
-import { defaultRewriteService, RewriteOptions } from "./server/services/ai/index.js";
+import { defaultQueueService, QueueItem } from "./server/services/queue/queueService.js";
+import { defaultReportGroupService } from "./server/services/reporting/reportGroupService.js";
 import {
   AdminConfig,
   BotSettings,
@@ -96,13 +97,6 @@ const DEFAULT_AI_PROCESSING: AiProcessingConfig = {
   removeUsernames: true,
   removeHashtags: true,
   removeEmojis: false,
-  ai_rewrite_enabled: false,
-  aiRewriteEnabled: false,
-  enableAiRewrite: false,
-  rewrite_style: 'formal',
-  rewriteStyle: 'formal',
-  writingStyle: 'formal',
-  customWritingStyle: '',
   enableContactManager: false,
   defaultContactNote: '📌 جهت ارتباط با مدیر کانال در ارتباط باشید',
   enableMediaControl: false,
@@ -388,6 +382,8 @@ interface DataStore {
   telegramClientConfig: TelegramClientConfig;
   telegramSession: string; // GramJS session string saved permanently
   isMonitoringPaused?: boolean;
+  isSystemTurnedOff?: boolean; // Emergency Master Kill Switch (خاموشی کامل سیستم)
+  botPollerOffset?: number; // Persisted offset for Telegram Bot long-polling
   settings: BotSettings;
   sources: SourceChannel[];
   logs: ActivityLog[];
@@ -403,6 +399,9 @@ interface DataStore {
 // Initial default state
 let store: DataStore = {
   adminPasswordHash: "admin123",
+  isMonitoringPaused: false,
+  isSystemTurnedOff: false,
+  botPollerOffset: 0,
   telegramClientConfig: {
     apiId: process.env.API_ID ? parseInt(process.env.API_ID, 10) : null,
     apiHash: (process.env.API_HASH && process.env.API_HASH.trim()) || "",
@@ -881,47 +880,6 @@ setInterval(() => {
 // AI Processing Pipeline Helpers
 const recentMessageCache: { textOrHash: string; timestamp: number }[] = [];
 
-async function runAiRewrite(
-  text: string,
-  styleOverride?: string,
-  ignoreEnabledCheck: boolean = false,
-  extraOptions: Partial<RewriteOptions> = {}
-): Promise<string> {
-  if (!text || !text.trim()) return text;
-
-  const config = store.settings?.aiProcessing || DEFAULT_AI_PROCESSING;
-  const isEnabled = !!(config.ai_rewrite_enabled ?? config.enableAiRewrite ?? config.aiRewriteEnabled);
-
-  if (!ignoreEnabledCheck && !isEnabled) {
-    return text;
-  }
-
-  const styleVal = (styleOverride || config.ai_rewrite_style || config.rewrite_style || config.rewriteStyle || config.writingStyle || 'formal_news') as any;
-  const intensityVal = (extraOptions.intensity || config.ai_rewrite_intensity || 'medium') as any;
-  const customPromptVal = extraOptions.customPrompt !== undefined ? extraOptions.customPrompt : (config.ai_rewrite_custom_prompt || '');
-  const maxLengthVal = extraOptions.maxLength || config.ai_rewrite_max_length || 2000;
-
-  console.log('[AI REWRITE] Executing self-hosted Persian rewriter pipeline...');
-  console.log(`[AI REWRITE] Style: ${styleVal}, Intensity: ${intensityVal}`);
-
-  try {
-    const result = await defaultRewriteService.rewrite(text, {
-      style: styleVal,
-      intensity: intensityVal,
-      customPrompt: customPromptVal,
-      maxLength: maxLengthVal,
-      preserveEmojis: true,
-      ...extraOptions,
-    });
-
-    console.log(`[AI REWRITE] Rewrite completed successfully via ${result.providerUsed} in ${result.processingTimeMs}ms`);
-    return result.rewrittenText || text;
-  } catch (err: any) {
-    console.error('[AI REWRITE] Error in rewriter, preserving original text without interruption:', err?.message || err);
-    return text;
-  }
-}
-
 async function runAiJobExtraction(text: string): Promise<{
   extracted: {
     jobTitle: string;
@@ -1029,13 +987,7 @@ async function processMessagePipeline(
     removedItems = cleanRes.removedItems;
   }
 
-  // 3. AI Rewrite (only if enabled)
-  const isRewriteEnabled = !!(config.enableAiRewrite || config.aiRewriteEnabled || (config as any).ai_rewrite_enabled);
-  if (isRewriteEnabled && currentText.trim().length > 0) {
-    currentText = await runAiRewrite(currentText);
-  }
-
-  // 4. Duplicate Protection (Duplicate Check)
+  // 3. Duplicate Protection (Duplicate Check)
   if (config.enableDuplicateProtection) {
     const timeWindowMs = (config.timeWindowHours || 1) * 3600 * 1000;
     const now = Date.now();
@@ -1247,7 +1199,8 @@ Message ID: #${message.id}
 
   try {
     let contentType = "text";
-    let messageSentSuccessfully = false;
+    let bufferBase64: string | undefined = undefined;
+    let fileName: string | undefined = undefined;
 
     // Detect media types
     if (message.media) {
@@ -1262,22 +1215,10 @@ Message ID: #${message.id}
       }
 
       if (buffer && buffer instanceof Buffer) {
+        bufferBase64 = buffer.toString("base64");
         if (message.media instanceof Api.MessageMediaPhoto) {
           contentType = "photo";
-          const res = await sendBotMedia(
-            botToken,
-            "sendPhoto",
-            destination,
-            buffer,
-            "photo.jpg",
-            "photo",
-            caption
-          );
-          if (res.ok) {
-            messageSentSuccessfully = true;
-          } else {
-            console.warn(`[PHOTO FORWARD FAILED] description: ${res.description} - falling back to text`);
-          }
+          fileName = "photo.jpg";
         } else if (message.media instanceof Api.MessageMediaDocument) {
           const doc = message.media.document;
           let mime = "application/octet-stream";
@@ -1287,60 +1228,44 @@ Message ID: #${message.id}
 
           if (mime.startsWith("video/")) {
             contentType = "video";
-            const res = await sendBotMedia(botToken, "sendVideo", destination, buffer, "video.mp4", "video", caption);
-            if (res.ok) messageSentSuccessfully = true;
+            fileName = "video.mp4";
           } else if (mime.startsWith("audio/")) {
             contentType = "audio";
-            const res = await sendBotMedia(botToken, "sendAudio", destination, buffer, "audio.mp3", "audio", caption);
-            if (res.ok) messageSentSuccessfully = true;
+            fileName = "audio.mp3";
           } else if (mime.includes("gif") || mime.includes("animation")) {
             contentType = "animation";
-            const res = await sendBotMedia(botToken, "sendAnimation", destination, buffer, "animation.gif", "animation", caption);
-            if (res.ok) messageSentSuccessfully = true;
+            fileName = "animation.gif";
           } else {
             contentType = "document";
-            const res = await sendBotMedia(botToken, "sendDocument", destination, buffer, "file.dat", "document", caption);
-            if (res.ok) messageSentSuccessfully = true;
+            fileName = "file.dat";
           }
         }
       }
     }
 
-    // If media sending was not applicable or media send failed, send as text message
-    if (!messageSentSuccessfully) {
-      contentType = "text";
-      const textPayload = processedText || `پست جدید #${message.id} از ${source.title || ('@' + source.username)}`;
-      
-      let res = await callTelegramBotApi(botToken, "sendMessage", {
-        chat_id: destination,
-        text: textPayload,
-        parse_mode: "HTML",
-      });
+    // Enqueue message into the Persistent Queue
+    const enqueued = await defaultQueueService.enqueue({
+      sourceChannelId: source.id,
+      sourceChannelUsername: source.username,
+      sourceChannelTitle: source.title,
+      destinationChannelId: destination,
+      originalMessageId: message.id,
+      messageText: processedText,
+      formattedText: caption,
+      mediaType: contentType,
+      mediaMetadata: {
+        bufferBase64,
+        fileName,
+        contentType,
+        caption,
+        removedItems: pipelineResult.removedItems,
+        signatureAdded: pipelineResult.signatureAdded,
+      },
+    });
 
-      if (!res.ok) {
-        // Fallback plain text send without parse mode
-        res = await callTelegramBotApi(botToken, "sendMessage", {
-          chat_id: destination,
-          text: textPayload,
-        });
-      }
-
-      if (res.ok) {
-        messageSentSuccessfully = true;
-      } else {
-        const errorDetail = humanizeTelegramError(res.description);
-        throw new Error(errorDetail);
-      }
-    }
-
-    // Success recording
+    // Mark as processed in source
     source.lastMessageId = Math.max(source.lastMessageId || 0, message.id);
-    source.totalTransferred = (source.totalTransferred || 0) + 1;
     source.errorMessage = undefined;
-    if (!store.stats) {
-      store.stats = { totalTransferred: 0, failedMessages: 0, startTime: new Date().toISOString() };
-    }
-    store.stats.totalTransferred = (store.stats.totalTransferred || 0) + 1;
 
     if (!store.processedMessageIds) {
       store.processedMessageIds = {};
@@ -1350,7 +1275,14 @@ Message ID: #${message.id}
     }
     store.processedMessageIds[source.id].push(message.id);
 
-    const logDetails = `پست #${message.id} با موفقیت پردازش و به ${destination} ارسال شد.` +
+    let scheduledTimeStr = "";
+    try {
+      scheduledTimeStr = new Date(enqueued.scheduledTime).toLocaleTimeString("fa-IR", { timeZone: "Asia/Tehran" });
+    } catch {
+      scheduledTimeStr = enqueued.scheduledTime;
+    }
+
+    const logDetails = `پست #${message.id} با موفقیت در صف ارسال هوشمند قرار گرفت (زمانبندی: ${scheduledTimeStr}).` +
       (pipelineResult.removedItems && pipelineResult.removedItems.length > 0 ? ` [موارد پاکسازی‌شده: ${pipelineResult.removedItems.join(', ')}]` : '') +
       (pipelineResult.signatureAdded ? ` [امضای پیام اضافه شد]` : '');
 
@@ -1368,7 +1300,7 @@ Message ID: #${message.id}
     return { success: true };
   } catch (err: any) {
     const errorMsg = humanizeTelegramError(err?.message || err);
-    console.error(`[TELEGRAM FORWARD ERROR] Destination: "${destination}" - Error:`, errorMsg);
+    console.error(`[QUEUE ENQUEUE ERROR] Destination: "${destination}" - Error:`, errorMsg);
     source.errorMessage = errorMsg;
     addLog(
       source.id,
@@ -1377,7 +1309,7 @@ Message ID: #${message.id}
       message.id,
       "unknown",
       "error",
-      `خطا در بازآفرینی پست #${message.id}: ${errorMsg}`
+      `خطا در صف‌بندی پست #${message.id}: ${errorMsg}`
     );
     saveStore();
     return { success: false, error: errorMsg };
@@ -1390,6 +1322,12 @@ let globalEventHandlerRegistered = false;
 // Global Telegram NewMessage Event Handler for ALL incoming messages
 async function handleGlobalNewMessage(event: NewMessageEvent) {
   try {
+    // 0. Check Master Emergency Power Switch
+    if (store.isSystemTurnedOff) {
+      // Emergency kill switch active: Completely halt processing any incoming messages
+      return;
+    }
+
     const message = event.message;
     if (!message) return;
 
@@ -2118,6 +2056,177 @@ async function startServer() {
           performTelegramDatabaseBackup(false).catch((e) => console.error("Auto backup error:", e));
         }
       }, TWENTY_FOUR_HOURS_MS);
+
+      // Initialize Admin Report Group Service
+      defaultReportGroupService.init(store.settings?.botToken, store.settings?.reportGroupConfig);
+
+      // Initialize Smart Queue Service
+      defaultQueueService.init(store.settings?.queueSettings);
+
+      // Start the persistent queue background worker
+      defaultQueueService.startWorker(async (item: QueueItem): Promise<{ success: boolean; error?: string }> => {
+        const botToken = store.settings?.botToken;
+        const destination = item.destinationChannelId || store.settings?.destinationChannel;
+        if (!botToken || !destination) {
+          return { success: false, error: "توکن ربات یا کانال مقصد تنظیم نشده است." };
+        }
+
+        try {
+          let sentSuccess = false;
+          const mediaMeta = item.mediaMetadata;
+          const caption = item.formattedText || item.messageText || "";
+
+          if (mediaMeta?.bufferBase64 && item.mediaType && item.mediaType !== "text") {
+            const buffer = Buffer.from(mediaMeta.bufferBase64, "base64");
+            const fileName = mediaMeta.fileName || `${item.mediaType}.dat`;
+
+            let botMethod = "sendDocument";
+            let fieldName = "document";
+            if (item.mediaType === "photo") {
+              botMethod = "sendPhoto";
+              fieldName = "photo";
+            } else if (item.mediaType === "video") {
+              botMethod = "sendVideo";
+              fieldName = "video";
+            } else if (item.mediaType === "audio") {
+              botMethod = "sendAudio";
+              fieldName = "audio";
+            } else if (item.mediaType === "animation") {
+              botMethod = "sendAnimation";
+              fieldName = "animation";
+            }
+
+            const res = await sendBotMedia(botToken, botMethod, destination, buffer, fileName, fieldName, caption);
+            if (res.ok) {
+              sentSuccess = true;
+            } else {
+              console.warn(`[QUEUE SENDER] Media send failed (${res.description}), falling back to text`);
+            }
+          }
+
+          if (!sentSuccess) {
+            const textPayload = item.messageText || caption || `پست #${item.originalMessageId} از ${item.sourceChannelTitle || item.sourceChannelUsername}`;
+            let res = await callTelegramBotApi(botToken, "sendMessage", {
+              chat_id: destination,
+              text: textPayload,
+              parse_mode: "HTML",
+            });
+            if (!res.ok) {
+              res = await callTelegramBotApi(botToken, "sendMessage", {
+                chat_id: destination,
+                text: textPayload,
+              });
+            }
+            if (res.ok) {
+              sentSuccess = true;
+            } else {
+              const errDetail = humanizeTelegramError(res.description);
+              throw new Error(errDetail);
+            }
+          }
+
+          // Update stats and source
+          const source = store.sources?.find((s) => s.id === item.sourceChannelId || s.username === item.sourceChannelUsername);
+          if (source) {
+            source.totalTransferred = (source.totalTransferred || 0) + 1;
+            source.errorMessage = undefined;
+          }
+          if (!store.stats) {
+            store.stats = { totalTransferred: 0, failedMessages: 0, startTime: new Date().toISOString() };
+          }
+          store.stats.totalTransferred = (store.stats.totalTransferred || 0) + 1;
+
+          addLog(
+            item.sourceChannelId,
+            item.sourceChannelUsername || "source",
+            item.sourceChannelTitle || "کانال مبدا",
+            item.originalMessageId,
+            item.mediaType || "text",
+            "success",
+            `پست #${item.originalMessageId} از صف ارسال هوشمند با موفقیت به ${destination} ارسال شد.`
+          );
+          saveStore();
+          return { success: true };
+        } catch (err: any) {
+          const errorMsg = humanizeTelegramError(err?.message || err);
+          console.error(`[QUEUE WORKER ERROR] Item ${item.id} ->`, errorMsg);
+          if (!store.stats) {
+            store.stats = { totalTransferred: 0, failedMessages: 0, startTime: new Date().toISOString() };
+          }
+          store.stats.failedMessages = (store.stats.failedMessages || 0) + 1;
+          addLog(
+            item.sourceChannelId,
+            item.sourceChannelUsername || "source",
+            item.sourceChannelTitle || "کانال مبدا",
+            item.originalMessageId,
+            item.mediaType || "text",
+            "error",
+            `خطا در ارسال پست #${item.originalMessageId} از صف: ${errorMsg}`
+          );
+          saveStore();
+          return { success: false, error: errorMsg };
+        }
+      });
+
+      // Scheduled Daily Digest at 00:00 Tehran Time (checks every 30 seconds, runs once per day)
+      let lastDailyDigestSentDate = "";
+      setInterval(async () => {
+        const repConfig = store.settings?.reportGroupConfig;
+        if (!repConfig?.dailyDigestEnabled || !repConfig?.chatId) return;
+
+        const now = new Date();
+        let tehranHour = -1;
+        let tehranMin = -1;
+        let todayKey = "";
+        try {
+          const formatter = new Intl.DateTimeFormat("en-US", {
+            timeZone: "Asia/Tehran",
+            hour: "numeric",
+            minute: "numeric",
+            hour12: false,
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+          });
+          const parts = formatter.formatToParts(now);
+          const map: Record<string, string> = {};
+          for (const p of parts) map[p.type] = p.value;
+          tehranHour = parseInt(map.hour || "0", 10);
+          tehranMin = parseInt(map.minute || "0", 10);
+          todayKey = `${map.year}-${map.month}-${map.day}`;
+        } catch (_) {
+          return;
+        }
+
+        if (tehranHour === 0 && tehranMin <= 2 && lastDailyDigestSentDate !== todayKey) {
+          lastDailyDigestSentDate = todayKey;
+          console.log(`⏰ [DAILY DIGEST] 00:00 Tehran Time reached. Generating Daily Digest for ${todayKey}...`);
+
+          const qStats = defaultQueueService.getStats();
+          const startMs = store.stats?.startTime ? new Date(store.stats.startTime).getTime() : Date.now();
+          const uptimeSec = Math.floor((Date.now() - startMs) / 1000);
+          const hours = Math.floor(uptimeSec / 3600);
+          const mins = Math.floor((uptimeSec % 3600) / 60);
+
+          await defaultReportGroupService.sendDailyDigest({
+            persianDate: getTehranDateString(now),
+            tehranTime: getTehranTimeString(now, true),
+            totalReceived: (store.stats?.totalTransferred || 0) + (store.stats?.failedMessages || 0),
+            totalFiltered: (store.settings?.aiProcessing?.messagesBlocked || 0),
+            totalSent: store.stats?.totalTransferred || 0,
+            totalFailed: store.stats?.failedMessages || 0,
+            queuePending: qStats.pendingCount,
+            queueScheduled: qStats.scheduledCount,
+            queueFailed: qStats.failedCount,
+            clientStatus: (gramStatus === "connected" && !!gramClient) ? "🟢 متصل" : "🔴 قطع",
+            botStatus: (store.settings?.botToken && store.settings?.isVerified) ? "🟢 متصل" : "🔴 قطع",
+            dbStatus: isDbConnected ? "🟢 PostgreSQL" : "🟡 Local Storage",
+            uptimeFormatted: `${hours} ساعت و ${mins} دقیقه`,
+          }).catch((err) => {
+            console.error("[DAILY DIGEST CRON ERROR]:", err);
+          });
+        }
+      }, 30000);
 
       // Attempt initial GramJS connection
       setTimeout(() => {
@@ -3496,9 +3605,12 @@ async function startServer() {
 
   // AI Message Processing Center: Get Settings
   app.get("/api/ai-processing", (req, res) => {
+    const raw = (store.settings.aiProcessing || DEFAULT_AI_PROCESSING) as any;
     res.json({
       success: true,
-      aiProcessing: store.settings.aiProcessing || DEFAULT_AI_PROCESSING,
+      aiProcessing: {
+        ...raw,
+      },
     });
   });
 
@@ -3506,54 +3618,167 @@ async function startServer() {
   app.post("/api/ai-processing", (req, res) => {
     const config = req.body;
     if (config && typeof config === "object") {
+      const prevAi = store.settings.aiProcessing || DEFAULT_AI_PROCESSING;
+
       store.settings.aiProcessing = {
         ...DEFAULT_AI_PROCESSING,
-        ...store.settings.aiProcessing,
+        ...prevAi,
         ...config,
       };
       saveStore();
       return res.json({
         success: true,
-        message: "تنظیمات مرکز پردازش هوشمند پیام‌ها با موفقیت ذخیره گردید.",
+        message: "تنظیمات مرکز پردازش پیام‌ها با موفقیت ذخیره گردید.",
         aiProcessing: store.settings.aiProcessing,
       });
     }
     res.status(400).json({ success: false, message: "تنظیمات نامعتبر است." });
   });
 
-  // AI Message Processing Center: Test Rewrite
-  app.post("/api/ai-processing/test-rewrite", async (req, res) => {
-    const { text, style, intensity, customPrompt, maxLength } = req.body;
-    if (!text || !text.trim()) {
-      return res.status(400).json({ success: false, message: "متن جهت بازنویسی الزامی است." });
-    }
+  // --- Queue Management Endpoints ---
+  app.get("/api/queue", async (req, res) => {
+    const status = (req.query.status as string) || "all";
+    const limit = parseInt(req.query.limit as string, 10) || 50;
     try {
-      const config = store.settings?.aiProcessing || DEFAULT_AI_PROCESSING;
-      const targetStyle = (style || config.ai_rewrite_style || config.rewrite_style || 'formal_news') as any;
-      const targetIntensity = (intensity || config.ai_rewrite_intensity || 'medium') as any;
-      const targetPrompt = customPrompt !== undefined ? customPrompt : (config.ai_rewrite_custom_prompt || '');
-      const targetMax = maxLength ? Number(maxLength) : (config.ai_rewrite_max_length || 2000);
-
-      const result = await defaultRewriteService.rewrite(text, {
-        style: targetStyle,
-        intensity: targetIntensity,
-        customPrompt: targetPrompt,
-        maxLength: targetMax,
-        preserveEmojis: true,
-      });
-
-      res.json({
-        success: true,
-        rewrittenText: result.rewrittenText,
-        originalText: result.originalText,
-        processingTimeMs: result.processingTimeMs,
-        preservedEntities: result.preservedEntities,
-        providerUsed: result.providerUsed,
-        stats: result.stats,
-      });
+      const items = await defaultQueueService.getQueueItems(status, limit);
+      res.json({ success: true, items });
     } catch (err: any) {
-      res.status(500).json({ success: false, message: `خطا در بازنویسی: ${err.message}` });
+      res.status(500).json({ success: false, message: err.message, items: [] });
     }
+  });
+
+  app.get("/api/queue/stats", (req, res) => {
+    const stats = defaultQueueService.getStats();
+    res.json({ success: true, stats });
+  });
+
+  app.post("/api/queue/settings", async (req, res) => {
+    const settings = req.body;
+    try {
+      const updated = await defaultQueueService.updateSettings(settings);
+      if (!store.settings) store.settings = {} as any;
+      store.settings.queueSettings = updated;
+      saveStore();
+      res.json({ success: true, message: "تنظیمات صف هوشمند با موفقیت ذخیره شد.", settings: updated });
+    } catch (err: any) {
+      res.status(400).json({ success: false, message: err.message });
+    }
+  });
+
+  app.post("/api/queue/pause", (req, res) => {
+    defaultQueueService.pauseQueue();
+    if (store.settings?.queueSettings) store.settings.queueSettings.isQueuePaused = true;
+    saveStore();
+    res.json({ success: true, message: "صف ارسال پیام‌ها موقتاً متوقف گردید." });
+  });
+
+  app.post("/api/queue/resume", (req, res) => {
+    defaultQueueService.resumeQueue();
+    if (store.settings?.queueSettings) store.settings.queueSettings.isQueuePaused = false;
+    saveStore();
+    res.json({ success: true, message: "صف ارسال پیام‌ها با موفقیت فعال شد." });
+  });
+
+  app.post("/api/queue/retry-failed", async (req, res) => {
+    try {
+      const count = await defaultQueueService.retryFailed();
+      res.json({ success: true, count, message: `${count} پیام ناموفق مجدداً به صف زمان‌بندی اضافه شدند.` });
+    } catch (err: any) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
+  app.post("/api/queue/clear-failed", async (req, res) => {
+    try {
+      const count = await defaultQueueService.clearFailed();
+      res.json({ success: true, count, message: `${count} پیام ناموفق از صف حذف گردیدند.` });
+    } catch (err: any) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
+  app.delete("/api/queue/item/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const success = await defaultQueueService.deleteItem(id);
+      res.json({ success, message: success ? "پیام از صف حذف گردید." : "پیام یافت نشد." });
+    } catch (err: any) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
+  // --- Admin Report Group Endpoints ---
+  app.get("/api/report-group", (req, res) => {
+    const config = store.settings?.reportGroupConfig || {
+      chatId: "",
+      status: "not_configured",
+      alertsEnabled: true,
+      dailyDigestEnabled: true,
+    };
+    res.json({ success: true, config });
+  });
+
+  app.post("/api/report-group", async (req, res) => {
+    const config = req.body;
+    if (!config || typeof config !== "object") {
+      return res.status(400).json({ success: false, message: "تنظیمات نامعتبر است." });
+    }
+    if (!store.settings) store.settings = {} as any;
+    store.settings.reportGroupConfig = {
+      chatId: String(config.chatId || "").trim(),
+      status: config.status || (config.chatId ? "connected" : "not_configured"),
+      lastTestedAt: config.lastTestedAt || (config.chatId ? new Date().toISOString() : undefined),
+      alertsEnabled: config.alertsEnabled !== false,
+      dailyDigestEnabled: config.dailyDigestEnabled !== false,
+    };
+    defaultReportGroupService.init(store.settings.botToken, store.settings.reportGroupConfig);
+    saveStore();
+    res.json({ success: true, message: "تنظیمات گروه مدیریت و گزارش ادمین با موفقیت ذخیره شد.", config: store.settings.reportGroupConfig });
+  });
+
+  app.post("/api/report-group/test", async (req, res) => {
+    const { chatId } = req.body;
+    const token = store.settings?.botToken;
+    if (!token) {
+      return res.status(400).json({ success: false, message: "توکن ربات تلگرام تنظیم نشده است." });
+    }
+    const targetChat = chatId || store.settings?.reportGroupConfig?.chatId;
+    if (!targetChat) {
+      return res.status(400).json({ success: false, message: "شناسه چت گزارش تنظیم نشده است." });
+    }
+    const result = await defaultReportGroupService.testConnection(targetChat, token);
+    if (result.success && store.settings?.reportGroupConfig) {
+      store.settings.reportGroupConfig.status = "connected";
+      store.settings.reportGroupConfig.lastTestedAt = new Date().toISOString();
+      saveStore();
+    }
+    res.json(result);
+  });
+
+  app.post("/api/report-group/send-digest-now", async (req, res) => {
+    const qStats = defaultQueueService.getStats();
+    const uptimeSec = Math.floor((Date.now() - (store.stats?.startTime ? new Date(store.stats.startTime).getTime() : Date.now())) / 1000);
+    const hours = Math.floor(uptimeSec / 3600);
+    const mins = Math.floor((uptimeSec % 3600) / 60);
+
+    const data = {
+      persianDate: getTehranDateString(),
+      tehranTime: getTehranTimeString(new Date(), true),
+      totalReceived: (store.stats?.totalTransferred || 0) + (store.stats?.failedMessages || 0),
+      totalFiltered: (store.settings?.aiProcessing?.messagesBlocked || 0),
+      totalSent: store.stats?.totalTransferred || 0,
+      totalFailed: store.stats?.failedMessages || 0,
+      queuePending: qStats.pendingCount,
+      queueScheduled: qStats.scheduledCount,
+      queueFailed: qStats.failedCount,
+      clientStatus: (gramStatus === "connected" && !!gramClient) ? "🟢 متصل" : "🔴 قطع",
+      botStatus: (store.settings?.botToken && store.settings?.isVerified) ? "🟢 متصل" : "🔴 قطع",
+      dbStatus: isDbConnected ? "🟢 PostgreSQL" : "🟡 Local Storage",
+      uptimeFormatted: `${hours} ساعت و ${mins} دقیقه`,
+    };
+
+    const result = await defaultReportGroupService.sendDailyDigest(data);
+    res.json(result);
   });
 
   // AI Message Processing Center: Test Content Cleaning
@@ -4091,27 +4316,48 @@ async function startServer() {
   }
 
   function getBotAdminMainMenuContent() {
+    const isOff = !!store.isSystemTurnedOff;
     const isPaused = !!store.isMonitoringPaused;
     const activeSources = store.sources ? store.sources.filter((s) => s.status === "active").length : 0;
     const totalSources = store.sources ? store.sources.length : 0;
     const totalTransferred = store.stats?.totalTransferred || 0;
     const isClientConn = gramStatus === "connected" || !!store.telegramClientConfig?.isConnected;
     const dest = store.settings?.destinationChannel || "تنظیم‌نشده";
+    const reportChan = store.settings?.reportGroupConfig?.chatId || "تنظیم‌نشده";
     const botUser = store.settings?.botInfo?.username ? `@${store.settings.botInfo.username}` : "تنظیم‌نشده";
 
-    const text =
-      `🤖 <b>پنل کنترل و مدیریت ربات فروارد</b>\n\n` +
-      `⚡ <b>وضعیت مانیتورینگ:</b> ${isPaused ? "⏸️ متوقف موقت" : "🟢 فعال و در حال مانیتورینگ"}\n` +
-      `📱 <b>کلاینت تلگرام (حساب شخصی):</b> ${isClientConn ? "🟢 متصل و آنلاین" : "🔴 قطع"}\n` +
-      `🤖 <b>ربات فرستنده:</b> <code>${botUser}</code>\n` +
-      `🎯 <b>کانال مقصد:</b> <code>${dest}</code>\n` +
-      `📡 <b>کانال‌های فعال:</b> ${activeSources} از ${totalSources} کانال\n` +
-      `📤 <b>کل پیام‌های منتقل‌شده:</b> <b>${totalTransferred}</b> پیام\n` +
-      `🕒 <b>زمان سرور:</b> <code>${getTehranDateTimeString()} (تهران +03:30)</code>\n\n` +
-      `<i>جهت مدیریت کامل سیستم، یکی از دکمه‌های زیر را لمس کنید:</i>`;
+    let text = "";
+    if (isOff) {
+      text =
+        `🚨 <b>هشدار بحرانی: سامانه در وضعیت «خاموشی کامل اضطراری» است!</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `🛑 کلیه مانیتورینگ کانال‌ها، صف ارسال و دریافت پیام‌ها کاملاً متوقف شده‌اند.\n` +
+        `تا زمان روشن کردن مجدد سیستم، هیچ پیامی رصد و منتقل نخواهد شد.\n\n` +
+        `<i>جهت روشن کردن مجدد و ادامه فعالیت، روی دکمه زیر کلیک کنید:</i>\n\n` +
+        `🕒 <b>زمان سرور:</b> <code>${getTehranDateTimeString()} (تهران +03:30)</code>`;
+    } else {
+      text =
+        `🤖 <b>پنل کنترل و مدیریت ربات فروارد</b>\n\n` +
+        `⚡ <b>وضعیت سیستم:</b> 🟢 روشن و پایدار\n` +
+        `📡 <b>وضعیت مانیتورینگ:</b> ${isPaused ? "⏸️ متوقف موقت" : "🟢 فعال و در حال رصد"}\n` +
+        `📱 <b>کلاینت تلگرام (حساب شخصی):</b> ${isClientConn ? "🟢 متصل و آنلاین" : "🔴 قطع"}\n` +
+        `🤖 <b>ربات فرستنده:</b> <code>${botUser}</code>\n` +
+        `🎯 <b>کانال مقصد:</b> <code>${dest}</code>\n` +
+        `📢 <b>کانال گزارش و بک‌آپ:</b> <code>${reportChan}</code>\n` +
+        `📡 <b>کانال‌های فعال:</b> ${activeSources} از ${totalSources} کانال\n` +
+        `📤 <b>کل پیام‌های منتقل‌شده:</b> <b>${totalTransferred}</b> پیام\n` +
+        `🕒 <b>زمان سرور:</b> <code>${getTehranDateTimeString()} (تهران +03:30)</code>\n\n` +
+        `<i>جهت مدیریت کامل سیستم، یکی از دکمه‌های زیر را لمس کنید:</i>`;
+    }
 
     const reply_markup = {
       inline_keyboard: [
+        [
+          {
+            text: isOff ? "🟢 روشن کردن مجدد سیستم (فعال‌سازی)" : "🛑 خاموش کردن کامل سیستم (اضطراری)",
+            callback_data: "cb_toggle_power",
+          },
+        ],
         [
           { text: "📊 آمار و وضعیت زنده", callback_data: "cb_status" },
           {
@@ -4126,6 +4372,10 @@ async function startServer() {
         [
           { text: "🎯 تغییر کانال مقصد", callback_data: "cb_change_dest" },
           { text: "🧪 ارسال پیام تست", callback_data: "cb_test_msg" },
+        ],
+        [
+          { text: "📢 کانال گزارش ادمین", callback_data: "cb_report_channel" },
+          { text: "📤 ارسال بک‌آپ به گزارش", callback_data: "cb_backup_to_report_channel" },
         ],
         [
           { text: "🧹 تنظیمات پاکسازی و فیلتر", callback_data: "cb_filters_menu" },
@@ -4168,7 +4418,8 @@ async function startServer() {
       `• <b>پیام‌های انتقال‌یافته:</b> ${transferred} عدد\n` +
       `• <b>خطاهای ارسال:</b> ${failed} عدد\n` +
       `• <b>مدت زمان آنلاین بودن:</b> ${hours} ساعت و ${mins} دقیقه\n` +
-      `• <b>سیستم بازنویسی خودکار (AI):</b> ${(store.settings?.aiProcessing?.ai_rewrite_enabled || store.settings?.aiProcessing?.enableAiRewrite) ? "🟢 فعال" : "⚪ غیرفعال"}\n\n` +
+      `• <b>صف ارسال هوشمند:</b> ${store.settings?.queueSettings?.isQueuePaused ? "⏸️ متوقف" : "🟢 فعال"}\n` +
+      `• <b>گروه گزارش ادمین:</b> ${store.settings?.reportGroupConfig?.chatId ? "🟢 متصل" : "⚪ تنظیم‌نشده"}\n\n` +
       `🕒 <b>زمان و مبنای ساعت:</b> <code>${getTehranDateTimeString()} (تهران +03:30)</code>`;
 
     const reply_markup = {

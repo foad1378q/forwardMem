@@ -14,7 +14,36 @@ export const settingsTable = pgTable('settings', {
   rateLimits: jsonb('rate_limits'),
   panelConfig: jsonb('panel_config'),
   forwardingSettings: jsonb('forwarding_settings'),
+  // Dedicated Admin Report Group
+  reportGroupChatId: text('report_group_chat_id'),
+  reportGroupStatus: text('report_group_status').default('not_configured'),
+  reportGroupLastTestedAt: text('report_group_last_tested_at'),
+  reportAlertsEnabled: boolean('report_alerts_enabled').default(true),
+  // Smart Queue & Daily Digest
+  queueSettings: jsonb('queue_settings'),
+  dailyDigestLastSentDate: text('daily_digest_last_sent_date'),
   updatedAt: timestamp('updated_at').defaultNow(),
+});
+
+export const queueTable = pgTable('message_queue', {
+  id: text('id').primaryKey(),
+  sourceChannelId: text('source_channel_id').notNull(),
+  sourceChannelUsername: text('source_channel_username'),
+  sourceChannelTitle: text('source_channel_title'),
+  destinationChannelId: text('destination_channel_id').notNull(),
+  originalMessageId: integer('original_message_id').notNull(),
+  messageText: text('message_text'),
+  formattedText: text('formatted_text'),
+  mediaType: text('media_type').default('text'),
+  mediaFileId: text('media_file_id'),
+  mediaMetadata: jsonb('media_metadata'),
+  status: text('status').notNull().default('pending'),
+  scheduledTime: text('scheduled_time').notNull(),
+  sentAt: text('sent_at'),
+  attemptsCount: integer('attempts_count').default(0),
+  lastError: text('last_error'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
 });
 
 export const telegramClientTable = pgTable('telegram_client', {

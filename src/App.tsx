@@ -4,6 +4,8 @@ import { getSettings, getSources, getLogs, getStats } from './lib/telegramApi';
 import { Navbar, AppTheme } from './components/Navbar';
 import { TaskbarNav } from './components/TaskbarNav';
 import { StatsOverview } from './components/StatsOverview';
+import { QueueManagementCard } from './components/QueueManagementCard';
+import { AdminReportGroupCard } from './components/AdminReportGroupCard';
 import { TelegramClientCard } from './components/TelegramClientCard';
 import { BotSetupCard } from './components/BotSetupCard';
 import { AiProcessingCenterCard } from './components/AiProcessingCenterCard';
@@ -189,6 +191,26 @@ export default function App() {
         {shouldShow('stats-overview') && (
           <div id="stats-overview">
             <StatsOverview stats={stats} />
+          </div>
+        )}
+
+        {/* Persistent Smart Queue & Scheduler Card */}
+        {shouldShow('queue-management-card') && (
+          <div id="queue-management-card">
+            <QueueManagementCard
+              isAdmin={isAdmin}
+              onRequireLogin={() => handleOpenLogin()}
+            />
+          </div>
+        )}
+
+        {/* Admin Report Group & Alerts Card */}
+        {shouldShow('report-group-card') && (
+          <div id="report-group-card">
+            <AdminReportGroupCard
+              isAdmin={isAdmin}
+              onRequireLogin={() => handleOpenLogin()}
+            />
           </div>
         )}
 

@@ -38,19 +38,6 @@ export interface AiProcessingConfig {
   removeHashtags?: boolean;
   removeEmojis?: boolean;
 
-  // Tab: AI Rewrite (Self-Hosted Local Engine)
-  ai_rewrite_enabled?: boolean;
-  aiRewriteEnabled?: boolean;
-  enableAiRewrite: boolean;
-  ai_rewrite_style?: 'formal_news' | 'friendly' | 'academic' | 'bullet_summary' | 'clickbait' | 'short_alert' | string;
-  ai_rewrite_intensity?: 'low' | 'medium' | 'high';
-  ai_rewrite_custom_prompt?: string;
-  ai_rewrite_max_length?: number;
-  rewrite_style?: string;
-  rewriteStyle?: string;
-  writingStyle: 'formal' | 'professional' | 'friendly' | 'simple' | 'news' | 'custom';
-  customWritingStyle?: string;
-
   // Contact Information
   enableContactManager: boolean;
   defaultContactNote: string;
@@ -64,19 +51,76 @@ export interface AiProcessingConfig {
   forwardAudios: boolean;
   mediaOrder: 'media_first' | 'text_first';
 
-  // Tab 6: Duplicate Protection
+  // Tab 5: Duplicate Protection
   enableDuplicateProtection: boolean;
   duplicateDetectionType: 'text_similarity' | 'media_hash' | 'both';
   timeWindowHours: number;
   maxForwardingCount: number;
 
-  // AI Job Extractor
+  // Job Extractor
   enableJobExtraction: boolean;
 
   // Tab 4: Message Signature / Footer
   enableMessageSignature?: boolean;
   signatureText?: string;
   addSignatureAfterEveryMessage?: boolean;
+}
+
+export type QueueItemStatus = 'pending' | 'scheduled' | 'sending' | 'sent' | 'failed' | 'cancelled';
+
+export interface QueueItem {
+  id: string;
+  sourceChannelId: string;
+  sourceChannelUsername?: string;
+  sourceChannelTitle?: string;
+  destinationChannelId: string;
+  originalMessageId: number;
+  messageText?: string;
+  formattedText?: string;
+  mediaType?: string;
+  mediaFileId?: string;
+  mediaMetadata?: any;
+  status: QueueItemStatus;
+  scheduledTime: string; // ISO string
+  sentAt?: string;
+  attemptsCount: number;
+  lastError?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface QueueSettings {
+  minDelaySeconds: number; // default 10
+  maxDelaySeconds: number; // default 45
+  silentHoursEnabled: boolean; // default false
+  silentHoursStart: string; // "23:00"
+  silentHoursEnd: string; // "07:00"
+  minIntervalSeconds: number; // default 5
+  maxMessagesPerMinute: number; // default 12
+  isQueuePaused: boolean; // default false
+}
+
+export interface QueueStats {
+  pendingCount: number;
+  scheduledCount: number;
+  sendingCount: number;
+  sentCount: number;
+  failedCount: number;
+  totalQueued: number;
+  isQueuePaused: boolean;
+  nextScheduledItemTime?: string;
+  floodWaitActiveUntil?: string;
+  currentRatePerMinute: number;
+}
+
+export interface ReportGroupConfig {
+  chatId: string; // Channel username (@channel) or Channel ID (-100...)
+  status: 'connected' | 'disconnected' | 'not_configured';
+  lastTestedAt?: string;
+  alertsEnabled: boolean;
+  dailyDigestEnabled: boolean;
+  autoBackupEnabled?: boolean;
+  lastBackupAt?: string;
 }
 
 export interface BotAdminConfig {
@@ -102,15 +146,20 @@ export interface BotSettings {
   };
   isVerified: boolean;
   lastVerifiedAt?: string;
+  isSystemTurnedOff?: boolean; // Emergency Master Kill Switch
   // Global Keyword Filter Settings
   globalKeywords?: string[];
   globalForbiddenKeywords?: string[];
   enableGlobalKeywords?: boolean;
   globalKeywordMatchMode?: 'any' | 'all';
-  // Advanced AI Message Processing Center
+  // Advanced Message Processing Center
   aiProcessing?: AiProcessingConfig;
   // In-Bot Admin Management
   botAdminConfig?: BotAdminConfig;
+  // Smart Queue Configuration
+  queueSettings?: QueueSettings;
+  // Dedicated Admin Report Group
+  reportGroupConfig?: ReportGroupConfig;
 }
 
 export interface SourceChannel {
@@ -199,9 +248,15 @@ export interface SystemStats {
   botStatus: 'connected' | 'disconnected' | 'not_configured';
   gramStatus?: 'connected' | 'connecting' | 'disconnected' | 'error';
   uptimeSeconds: number;
+  isSystemTurnedOff?: boolean;
   telegramClientConnected?: boolean;
   botConnected?: boolean;
   destinationVerified?: boolean;
   systemReady?: boolean;
   clientConfig?: TelegramClientConfig;
+  queueStats?: QueueStats;
+  reportGroupConfig?: ReportGroupConfig;
+  dbStatus?: 'connected' | 'local_fallback' | 'error';
+  lastReceivedTime?: string;
+  currentSendingRate?: number;
 }

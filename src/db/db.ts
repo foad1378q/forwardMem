@@ -104,6 +104,33 @@ async function createTablesIfNotExist() {
     ALTER TABLE settings ADD COLUMN IF NOT EXISTS rate_limits JSONB;
     ALTER TABLE settings ADD COLUMN IF NOT EXISTS panel_config JSONB;
     ALTER TABLE settings ADD COLUMN IF NOT EXISTS forwarding_settings JSONB;
+    ALTER TABLE settings ADD COLUMN IF NOT EXISTS report_group_chat_id TEXT;
+    ALTER TABLE settings ADD COLUMN IF NOT EXISTS report_group_status TEXT DEFAULT 'not_configured';
+    ALTER TABLE settings ADD COLUMN IF NOT EXISTS report_group_last_tested_at TEXT;
+    ALTER TABLE settings ADD COLUMN IF NOT EXISTS report_alerts_enabled BOOLEAN DEFAULT TRUE;
+    ALTER TABLE settings ADD COLUMN IF NOT EXISTS queue_settings JSONB;
+    ALTER TABLE settings ADD COLUMN IF NOT EXISTS daily_digest_last_sent_date TEXT;
+
+    CREATE TABLE IF NOT EXISTS message_queue (
+      id TEXT PRIMARY KEY,
+      source_channel_id TEXT NOT NULL,
+      source_channel_username TEXT,
+      source_channel_title TEXT,
+      destination_channel_id TEXT NOT NULL,
+      original_message_id INTEGER NOT NULL,
+      message_text TEXT,
+      formatted_text TEXT,
+      media_type TEXT DEFAULT 'text',
+      media_file_id TEXT,
+      media_metadata JSONB,
+      status TEXT NOT NULL DEFAULT 'pending',
+      scheduled_time TEXT NOT NULL,
+      sent_at TEXT,
+      attempts_count INTEGER DEFAULT 0,
+      last_error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
 
     CREATE TABLE IF NOT EXISTS telegram_client (
       id TEXT PRIMARY KEY DEFAULT 'default',
@@ -321,6 +348,12 @@ async function createTablesIfNotExist() {
     ALTER TABLE ai_processing ADD COLUMN IF NOT EXISTS whitelist JSONB;
     ALTER TABLE ai_processing ADD COLUMN IF NOT EXISTS contact_settings JSONB;
     ALTER TABLE ai_processing ADD COLUMN IF NOT EXISTS forwarding_settings JSONB;
+    ALTER TABLE ai_processing ADD COLUMN IF NOT EXISTS provider TEXT DEFAULT 'gemini';
+    ALTER TABLE ai_processing ADD COLUMN IF NOT EXISTS timeout_ms INTEGER DEFAULT 30000;
+    ALTER TABLE ai_processing ADD COLUMN IF NOT EXISTS system_prompt TEXT;
+    ALTER TABLE ai_processing ADD COLUMN IF NOT EXISTS connection_status TEXT DEFAULT 'untested';
+    ALTER TABLE ai_processing ADD COLUMN IF NOT EXISTS last_tested_at TEXT;
+    ALTER TABLE ai_processing ADD COLUMN IF NOT EXISTS last_error_message TEXT;
 
     CREATE TABLE IF NOT EXISTS duplicate_cache (
       id TEXT PRIMARY KEY,
@@ -654,8 +687,19 @@ export async function getStoreFromDb(): Promise<any> {
   const aiProcessingConfig = {
     enableAiProcessing: aiRow.enable_ai_processing !== false,
     enabled: aiRow.enabled !== false,
+    provider: aiRow.provider || 'gemini',
+    ai_provider: aiRow.provider || 'gemini',
     apiKey: aiApiKey,
-    model: aiRow.model || 'self-hosted',
+    ai_api_key: aiApiKey,
+    model: aiRow.model || 'gemini-3.8-flash',
+    ai_model: aiRow.model || 'gemini-3.8-flash',
+    timeoutMs: aiRow.timeout_ms || 30000,
+    ai_timeout_ms: aiRow.timeout_ms || 30000,
+    systemPrompt: aiRow.system_prompt || aiRow.custom_prompt || '',
+    ai_rewrite_system_prompt: aiRow.system_prompt || aiRow.custom_prompt || '',
+    connectionStatus: aiRow.connection_status || 'untested',
+    lastTestedAt: aiRow.last_tested_at || '',
+    lastErrorMessage: aiRow.last_error_message || '',
     customPrompt: aiRow.custom_prompt || '',
     translateToPersian: !!aiRow.translate_to_persian,
     sanitizeText: aiRow.sanitize_text !== false,
@@ -741,6 +785,14 @@ export async function getStoreFromDb(): Promise<any> {
       panelConfig: settingsRow.panel_config || null,
       forwardingSettings: settingsRow.forwarding_settings || null,
       aiProcessing: aiProcessingConfig,
+      queueSettings: settingsRow.queue_settings || null,
+      reportGroupConfig: {
+        chatId: settingsRow.report_group_chat_id || '',
+        status: (settingsRow.report_group_status as any) || (settingsRow.report_group_chat_id ? 'connected' : 'not_configured'),
+        lastTestedAt: settingsRow.report_group_last_tested_at || '',
+        alertsEnabled: settingsRow.report_alerts_enabled !== false,
+        dailyDigestEnabled: true,
+      },
     },
     sources,
     logs,
@@ -765,13 +817,16 @@ export async function saveSettingsToDb(settingsData: any): Promise<void> {
     await client.query('BEGIN');
 
     const encryptedBotToken = settingsData.botToken ? encryptValue(settingsData.botToken) : '';
+    const reportGroupConfig = settingsData.reportGroupConfig || {};
     await client.query(
       `INSERT INTO settings (
         id, bot_token, destination_channel, admin_password_hash, is_monitoring_paused, is_verified,
         global_keywords, global_forbidden_keywords, enable_global_keywords, global_keyword_match_mode,
-        rate_limits, panel_config, forwarding_settings, updated_at
+        rate_limits, panel_config, forwarding_settings,
+        report_group_chat_id, report_group_status, report_group_last_tested_at, report_alerts_enabled,
+        queue_settings, updated_at
       )
-      VALUES ('default', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+      VALUES ('default', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NOW())
       ON CONFLICT (id) DO UPDATE SET
       bot_token = COALESCE(NULLIF(EXCLUDED.bot_token, ''), settings.bot_token),
       destination_channel = EXCLUDED.destination_channel,
@@ -785,6 +840,11 @@ export async function saveSettingsToDb(settingsData: any): Promise<void> {
       rate_limits = EXCLUDED.rate_limits,
       panel_config = EXCLUDED.panel_config,
       forwarding_settings = EXCLUDED.forwarding_settings,
+      report_group_chat_id = COALESCE(EXCLUDED.report_group_chat_id, settings.report_group_chat_id),
+      report_group_status = COALESCE(EXCLUDED.report_group_status, settings.report_group_status),
+      report_group_last_tested_at = COALESCE(EXCLUDED.report_group_last_tested_at, settings.report_group_last_tested_at),
+      report_alerts_enabled = COALESCE(EXCLUDED.report_alerts_enabled, settings.report_alerts_enabled),
+      queue_settings = COALESCE(EXCLUDED.queue_settings, settings.queue_settings),
       updated_at = NOW()`,
       [
         encryptedBotToken,
@@ -799,6 +859,11 @@ export async function saveSettingsToDb(settingsData: any): Promise<void> {
         JSON.stringify(settingsData.rateLimits || null),
         JSON.stringify(settingsData.panelConfig || null),
         JSON.stringify(settingsData.forwardingSettings || null),
+        reportGroupConfig.chatId !== undefined ? reportGroupConfig.chatId : (settingsData.reportGroupChatId ?? null),
+        reportGroupConfig.status || settingsData.reportGroupStatus || null,
+        reportGroupConfig.lastTestedAt || settingsData.reportGroupLastTestedAt || null,
+        reportGroupConfig.alertsEnabled !== undefined ? reportGroupConfig.alertsEnabled : (settingsData.reportAlertsEnabled ?? null),
+        settingsData.queueSettings ? JSON.stringify(settingsData.queueSettings) : null,
       ]
     );
 
@@ -835,7 +900,7 @@ export async function saveAiProcessingToDb(ai: any): Promise<void> {
         forward_videos, forward_pdfs, forward_documents, forward_audios, media_order, enable_duplicate_protection,
         duplicate_detection_type, time_window_hours, max_forwarding_count, enable_job_extraction, enable_message_signature,
         signature_text, add_signature_after_every_message, prompt_templates, word_filters, replace_words, blacklist, whitelist,
-        contact_settings, forwarding_settings, updated_at
+        contact_settings, forwarding_settings, provider, timeout_ms, system_prompt, connection_status, last_tested_at, last_error_message, updated_at
       )
       VALUES (
         'default', $1, $2, $3, $4, $5, $6, $7, $8,
@@ -846,7 +911,8 @@ export async function saveAiProcessingToDb(ai: any): Promise<void> {
         $34, $35, $36, $37, $38, $39,
         $40, $41, $42, $43, $44,
         $45, $46, $47, $48, $49, $50, $51,
-        $52, $53, $54, $55, $56, $57, $58, $59, NOW()
+        $52, $53, $54, $55, $56, $57, $58, $59,
+        $60, $61, $62, $63, $64, $65, NOW()
       )
       ON CONFLICT (id) DO UPDATE SET
       enable_ai_processing = EXCLUDED.enable_ai_processing,
@@ -908,12 +974,18 @@ export async function saveAiProcessingToDb(ai: any): Promise<void> {
       whitelist = EXCLUDED.whitelist,
       contact_settings = EXCLUDED.contact_settings,
       forwarding_settings = EXCLUDED.forwarding_settings,
+      provider = COALESCE(NULLIF(EXCLUDED.provider, ''), ai_processing.provider),
+      timeout_ms = EXCLUDED.timeout_ms,
+      system_prompt = EXCLUDED.system_prompt,
+      connection_status = EXCLUDED.connection_status,
+      last_tested_at = EXCLUDED.last_tested_at,
+      last_error_message = EXCLUDED.last_error_message,
       updated_at = NOW()`,
       [
         ai.enableAiProcessing !== false,
         ai.enabled !== false,
         encryptedAiKey,
-        ai.model || 'self-hosted',
+        ai.model || ai.ai_model || 'gemini-3.8-flash',
         ai.customPrompt || '',
         !!ai.translateToPersian,
         ai.sanitizeText !== false,
@@ -969,6 +1041,12 @@ export async function saveAiProcessingToDb(ai: any): Promise<void> {
         JSON.stringify(ai.whitelist || null),
         JSON.stringify(ai.contactSettings || null),
         JSON.stringify(ai.forwardingSettings || null),
+        ai.provider || ai.ai_provider || 'gemini',
+        ai.timeoutMs || ai.ai_timeout_ms || 30000,
+        ai.systemPrompt || ai.ai_rewrite_system_prompt || '',
+        ai.connectionStatus || 'untested',
+        ai.lastTestedAt || '',
+        ai.lastErrorMessage || '',
       ]
     );
 
@@ -1655,4 +1733,233 @@ ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, name = EXCLUDED.name, use
 
   sql += `\nCOMMIT;\n`;
   return sql;
+}
+
+/**
+ * Queue Management Database Helpers
+ */
+export async function addQueueItemToDb(item: any): Promise<void> {
+  if (!pool || !isDbConnected) return;
+  try {
+    await pool.query(
+      `INSERT INTO message_queue (
+        id, source_channel_id, source_channel_username, source_channel_title,
+        destination_channel_id, original_message_id, message_text, formatted_text,
+        media_type, media_file_id, media_metadata, status, scheduled_time,
+        sent_at, attempts_count, last_error, created_at, updated_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+      ON CONFLICT (id) DO UPDATE SET
+        status = EXCLUDED.status,
+        scheduled_time = EXCLUDED.scheduled_time,
+        attempts_count = EXCLUDED.attempts_count,
+        last_error = EXCLUDED.last_error,
+        updated_at = EXCLUDED.updated_at`,
+      [
+        item.id,
+        item.sourceChannelId,
+        item.sourceChannelUsername || '',
+        item.sourceChannelTitle || '',
+        item.destinationChannelId,
+        item.originalMessageId,
+        item.messageText || '',
+        item.formattedText || '',
+        item.mediaType || 'text',
+        item.mediaFileId || '',
+        item.mediaMetadata ? JSON.stringify(item.mediaMetadata) : null,
+        item.status || 'pending',
+        item.scheduledTime,
+        item.sentAt || null,
+        item.attemptsCount || 0,
+        item.lastError || null,
+        item.createdAt || new Date().toISOString(),
+        item.updatedAt || new Date().toISOString(),
+      ]
+    );
+  } catch (err: any) {
+    console.error('[DATABASE] Failed to add item to message_queue:', err.message);
+  }
+}
+
+export async function getQueueItemsFromDb(statusFilter?: string, limit = 100): Promise<any[]> {
+  if (!pool || !isDbConnected) return [];
+  try {
+    let query = `SELECT * FROM message_queue`;
+    const params: any[] = [];
+    if (statusFilter && statusFilter !== 'all') {
+      query += ` WHERE status = $1`;
+      params.push(statusFilter);
+    }
+    query += ` ORDER BY scheduled_time ASC LIMIT $${params.length + 1}`;
+    params.push(limit);
+
+    const res = await pool.query(query, params);
+    return res.rows.map(row => ({
+      id: row.id,
+      sourceChannelId: row.source_channel_id,
+      sourceChannelUsername: row.source_channel_username,
+      sourceChannelTitle: row.source_channel_title,
+      destinationChannelId: row.destination_channel_id,
+      originalMessageId: row.original_message_id,
+      messageText: row.message_text,
+      formattedText: row.formatted_text,
+      mediaType: row.media_type,
+      mediaFileId: row.media_file_id,
+      mediaMetadata: row.media_metadata,
+      status: row.status,
+      scheduledTime: row.scheduled_time,
+      sentAt: row.sent_at,
+      attemptsCount: row.attempts_count || 0,
+      lastError: row.last_error,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  } catch (err: any) {
+    console.error('[DATABASE] Failed to fetch message_queue items:', err.message);
+    return [];
+  }
+}
+
+export async function updateQueueItemInDb(id: string, updates: Record<string, any>): Promise<void> {
+  if (!pool || !isDbConnected) return;
+  try {
+    const keys = Object.keys(updates);
+    if (keys.length === 0) return;
+
+    const columnMap: Record<string, string> = {
+      status: 'status',
+      scheduledTime: 'scheduled_time',
+      sentAt: 'sent_at',
+      attemptsCount: 'attempts_count',
+      lastError: 'last_error',
+      updatedAt: 'updated_at',
+      messageText: 'message_text',
+      formattedText: 'formatted_text',
+    };
+
+    const setClauses: string[] = [];
+    const values: any[] = [];
+    let idx = 1;
+
+    for (const key of keys) {
+      const col = columnMap[key];
+      if (col) {
+        setClauses.push(`${col} = $${idx}`);
+        values.push(updates[key]);
+        idx++;
+      }
+    }
+
+    setClauses.push(`updated_at = $${idx}`);
+    values.push(new Date().toISOString());
+    idx++;
+
+    values.push(id);
+    const query = `UPDATE message_queue SET ${setClauses.join(', ')} WHERE id = $${idx}`;
+    await pool.query(query, values);
+  } catch (err: any) {
+    console.error(`[DATABASE] Failed to update queue item ${id}:`, err.message);
+  }
+}
+
+export async function clearFailedQueueItemsFromDb(): Promise<number> {
+  if (!pool || !isDbConnected) return 0;
+  try {
+    const res = await pool.query(`DELETE FROM message_queue WHERE status = 'failed'`);
+    return res.rowCount || 0;
+  } catch (err: any) {
+    console.error('[DATABASE] Failed to clear failed queue items:', err.message);
+    return 0;
+  }
+}
+
+export async function retryFailedQueueItemsInDb(newScheduledTime: string): Promise<number> {
+  if (!pool || !isDbConnected) return 0;
+  try {
+    const res = await pool.query(
+      `UPDATE message_queue
+       SET status = 'scheduled', scheduled_time = $1, attempts_count = 0, last_error = NULL, updated_at = NOW()
+       WHERE status = 'failed'`,
+      [newScheduledTime]
+    );
+    return res.rowCount || 0;
+  } catch (err: any) {
+    console.error('[DATABASE] Failed to retry failed queue items:', err.message);
+    return 0;
+  }
+}
+
+export async function deleteQueueItemFromDb(id: string): Promise<void> {
+  if (!pool || !isDbConnected) return;
+  try {
+    await pool.query(`DELETE FROM message_queue WHERE id = $1`, [id]);
+  } catch (err: any) {
+    console.error(`[DATABASE] Failed to delete queue item ${id}:`, err.message);
+  }
+}
+
+export async function getQueueStatsFromDb(): Promise<{
+  pendingCount: number;
+  scheduledCount: number;
+  sendingCount: number;
+  sentCount: number;
+  failedCount: number;
+  totalQueued: number;
+}> {
+  if (!pool || !isDbConnected) {
+    return { pendingCount: 0, scheduledCount: 0, sendingCount: 0, sentCount: 0, failedCount: 0, totalQueued: 0 };
+  }
+  try {
+    const res = await pool.query(`
+      SELECT status, COUNT(*)::int AS cnt
+      FROM message_queue
+      GROUP BY status
+    `);
+    const counts: Record<string, number> = {
+      pending: 0,
+      scheduled: 0,
+      sending: 0,
+      sent: 0,
+      failed: 0,
+    };
+    for (const row of res.rows) {
+      if (counts[row.status] !== undefined) {
+        counts[row.status] = Number(row.cnt);
+      }
+    }
+    const totalQueued = (counts.pending || 0) + (counts.scheduled || 0) + (counts.sending || 0);
+    return {
+      pendingCount: counts.pending || 0,
+      scheduledCount: counts.scheduled || 0,
+      sendingCount: counts.sending || 0,
+      sentCount: counts.sent || 0,
+      failedCount: counts.failed || 0,
+      totalQueued,
+    };
+  } catch (err: any) {
+    console.error('[DATABASE] Failed to fetch queue stats:', err.message);
+    return { pendingCount: 0, scheduledCount: 0, sendingCount: 0, sentCount: 0, failedCount: 0, totalQueued: 0 };
+  }
+}
+
+export async function saveDailyDigestDateToDb(dateStr: string): Promise<void> {
+  if (!pool || !isDbConnected) return;
+  try {
+    await pool.query(
+      `UPDATE settings SET daily_digest_last_sent_date = $1 WHERE id = 'default'`,
+      [dateStr]
+    );
+  } catch (err: any) {
+    console.error('[DATABASE] Failed to save daily digest date:', err.message);
+  }
+}
+
+export async function getDailyDigestDateFromDb(): Promise<string> {
+  if (!pool || !isDbConnected) return '';
+  try {
+    const res = await pool.query(`SELECT daily_digest_last_sent_date FROM settings WHERE id = 'default'`);
+    return res.rows[0]?.daily_digest_last_sent_date || '';
+  } catch {
+    return '';
+  }
 }

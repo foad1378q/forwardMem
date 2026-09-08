@@ -314,34 +314,81 @@ export async function restoreServerBackup(filename: string): Promise<{ success: 
   }, { success: false, message: "" });
 }
 
-// Self-Hosted AI Message Rewrite Test API
-export async function testAiRewrite(
-  text: string,
-  options?: {
-    style?: string;
-    intensity?: string;
-    customPrompt?: string;
-    maxLength?: number;
-  }
-): Promise<{
-  success: boolean;
-  rewrittenText: string;
-  originalText: string;
-  processingTimeMs: number;
-  preservedEntities?: any;
-  message?: string;
-}> {
-  return safeFetchJson("/api/ai-processing/test-rewrite", {
+// Queue Management APIs
+export async function getQueueItems(statusFilter = 'all', limit = 50): Promise<{ success: boolean; items: any[] }> {
+  return safeFetchJson(`/api/queue?status=${statusFilter}&limit=${limit}`, undefined, { success: false, items: [] });
+}
+
+export async function getQueueStats(): Promise<{ success: boolean; stats: any }> {
+  return safeFetchJson("/api/queue/stats", undefined, {
+    success: false,
+    stats: {
+      pendingCount: 0,
+      scheduledCount: 0,
+      sendingCount: 0,
+      sentCount: 0,
+      failedCount: 0,
+      totalQueued: 0,
+      isQueuePaused: false,
+      currentRatePerMinute: 0,
+    },
+  });
+}
+
+export async function updateQueueSettings(settings: any): Promise<{ success: boolean; message: string; settings: any }> {
+  return safeFetchJson("/api/queue/settings", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, ...options }),
-  }, {
+    body: JSON.stringify(settings),
+  }, { success: false, message: "", settings: null });
+}
+
+export async function pauseQueue(): Promise<{ success: boolean; message: string }> {
+  return safeFetchJson("/api/queue/pause", { method: "POST" }, { success: false, message: "" });
+}
+
+export async function resumeQueue(): Promise<{ success: boolean; message: string }> {
+  return safeFetchJson("/api/queue/resume", { method: "POST" }, { success: false, message: "" });
+}
+
+export async function retryFailedQueue(): Promise<{ success: boolean; count: number; message: string }> {
+  return safeFetchJson("/api/queue/retry-failed", { method: "POST" }, { success: false, count: 0, message: "" });
+}
+
+export async function clearFailedQueue(): Promise<{ success: boolean; count: number; message: string }> {
+  return safeFetchJson("/api/queue/clear-failed", { method: "POST" }, { success: false, count: 0, message: "" });
+}
+
+export async function deleteQueueItem(id: string): Promise<{ success: boolean; message: string }> {
+  return safeFetchJson(`/api/queue/item/${encodeURIComponent(id)}`, { method: "DELETE" }, { success: false, message: "" });
+}
+
+// Admin Report Group APIs
+export async function getReportGroupConfig(): Promise<{ success: boolean; config: any }> {
+  return safeFetchJson("/api/report-group", undefined, {
     success: false,
-    rewrittenText: text,
-    originalText: text,
-    processingTimeMs: 0,
-    preservedEntities: {},
+    config: { chatId: "", status: "not_configured", alertsEnabled: true },
   });
+}
+
+export async function saveReportGroupConfig(config: any): Promise<{ success: boolean; message: string; config: any }> {
+  return safeFetchJson("/api/report-group", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  }, { success: false, message: "", config: null });
+}
+
+export async function testReportGroup(chatId?: string): Promise<{ success: boolean; message: string }> {
+  return safeFetchJson("/api/report-group/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chatId }),
+  }, { success: false, message: "" });
+}
+
+export async function sendDailyDigestNow(): Promise<{ success: boolean; message: string }> {
+  return safeFetchJson("/api/report-group/send-digest-now", { method: "POST" }, { success: false, message: "" });
 }
 
 
