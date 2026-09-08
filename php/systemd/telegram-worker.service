@@ -1,0 +1,16 @@
+[Unit]
+Description=Telegram Forwarder MTProto Worker Daemon (MadelineProto)
+After=network.target mysql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/var/www/telegram-forwarder
+ExecStart=/usr/bin/php /var/www/telegram-forwarder/worker.php
+Restart=always
+RestartSec=5s
+StandardOutput=append:/var/log/telegram-worker.log
+StandardError=append:/var/log/telegram-worker-error.log
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,6 @@
+{
+  "name": "Telegram Forwarder Bot",
+  "description": "پلتفرم هوشمند مانیتورینگ و انتقال خودکار پست‌های کانال‌ها و گروه‌های تلگرام به کانال مقصد با پشتیبانی کامل آلبوم و فرمت پیام",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

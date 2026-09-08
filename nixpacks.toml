@@ -1,0 +1,20 @@
+# Nixpacks Configuration for Railway Deployment
+# Forces Node.js 22 LTS provider and suppresses any legacy Node 18 or PHP detections
+
+providers = ["node"]
+
+[variables]
+NIXPACKS_NODE_VERSION = "22"
+NODE_ENV = "production"
+
+[phases.setup]
+nixPkgs = ["nodejs_22", "npm-10_x"]
+
+[phases.install]
+cmds = ["npm ci --include=dev || npm install"]
+
+[phases.build]
+cmds = ["npm run build"]
+
+[start]
+cmd = "npm start"

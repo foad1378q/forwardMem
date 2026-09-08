@@ -1,0 +1,20 @@
+# ==============================================================================
+# Telegram Forwarder Security & Optimization (.htaccess for cPanel/Apache)
+# ==============================================================================
+
+Options -Indexes
+ServerSignature Off
+
+# جلوگیری از دسترسی به فایل‌های حساس و لاگ‌ها
+<FilesMatch "\.(sample\.php|sql|log|lock|madeline|env|sh|service|json)$">
+    Order allow,deny
+    Deny from all
+</FilesMatch>
+
+# محافظت از پوشه config و session
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^config/ - [F,L]
+    RewriteRule ^session/ - [F,L]
+    RewriteRule ^backups/ - [F,L]
+</IfModule>
