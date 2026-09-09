@@ -27,7 +27,7 @@ export interface NavSection {
 export const NAV_SECTIONS: NavSection[] = [
   { id: 'stats-overview', label: 'داشبورد مانیتورینگ', shortLabel: 'داشبورد', icon: BarChart3 },
   { id: 'queue-management-card', label: 'صف و ارسال هوشمند', shortLabel: 'صف ارسال', icon: Clock },
-  { id: 'report-group-card', label: 'گروه گزارش و هشدار', shortLabel: 'گروه گزارش', icon: ShieldAlert },
+  { id: 'report-group-card', label: 'کانال گزارش و هشدار', shortLabel: 'کانال گزارش', icon: ShieldAlert },
   { id: 'telegram-client-card', label: 'حساب تلگرام', shortLabel: 'اکانت', icon: Smartphone },
   { id: 'bot-setup-card', label: 'تنظیمات ربات', shortLabel: 'ربات', icon: Bot },
   { id: 'in-bot-admin-card', label: 'مدیریت از داخل ربات', shortLabel: 'مدیریت ربات', icon: MessageSquareCode },

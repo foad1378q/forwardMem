@@ -413,7 +413,6 @@ let store: DataStore = {
     lastConnectedAt: "",
   },
   telegramSession: "",
-  isMonitoringPaused: false,
   settings: {
     botToken: "",
     destinationChannel: "",
@@ -1387,6 +1386,16 @@ async function handleGlobalNewMessage(event: NewMessageEvent) {
       candidateKeys.add(`100${cleanNum}`);
       candidateKeys.add(`-${cleanNum}`);
     }
+
+    // Prevent infinite loop: Never process messages originating from destination channel or report channel
+    const destClean = store.settings.destinationChannel ? cleanChannelIdentifier(store.settings.destinationChannel).toLowerCase() : "";
+    const reportClean = store.settings.reportGroupConfig?.chatId ? cleanChannelIdentifier(store.settings.reportGroupConfig.chatId).toLowerCase() : "";
+    if (destClean && (chatUsername === destClean || candidateKeys.has(destClean) || candidateKeys.has(`@${destClean}`))) {
+      return;
+    }
+    if (reportClean && (chatUsername === reportClean || candidateKeys.has(reportClean) || candidateKeys.has(`@${reportClean}`))) {
+      return;
+    }
     if (peerChannelId) {
       const cleanPeer = peerChannelId.replace(/^-100/, "").replace(/^-/, "");
       candidateKeys.add(peerChannelId);
@@ -1557,6 +1566,11 @@ async function processMonitoredChannelMessage(
 
     // Always create a log entry if not forwarded
     if (!keywordCheckPassed) {
+      source.lastMessageId = Math.max(source.lastMessageId || 0, messageId);
+      if (!processedList.includes(messageId)) {
+        processedList.push(messageId);
+        if (processedList.length > 500) processedList.shift();
+      }
       addLog(
         source.id,
         source.username,
@@ -1806,15 +1820,15 @@ async function performTelegramDatabaseBackup(
   const token = store.settings.botToken;
   const dest = customDestination
     ? String(customDestination)
-    : (store.settings.botAdminConfig?.adminTelegramUserId ||
-       (store.settings.botAdminConfig?.autoAuthorizedUsers && store.settings.botAdminConfig.autoAuthorizedUsers[0]) ||
-       store.settings.destinationChannel);
+    : (store.settings.reportGroupConfig?.chatId ||
+       store.settings.botAdminConfig?.adminTelegramUserId ||
+       (store.settings.botAdminConfig?.autoAuthorizedUsers && store.settings.botAdminConfig.autoAuthorizedUsers[0]));
 
   if (!token) {
     return { success: false, message: "توکن ربات تلگرام هنوز تنظیم نشده است." };
   }
   if (!dest) {
-    return { success: false, message: "شناسه عددی اکانت مدیر یا کانال مقصد جهت دریافت بک‌آپ تنظیم نشده است. می‌توانید دستور /backup را در پی‌وی ربات ارسال فرمایید." };
+    return { success: false, message: "شناسه کانال گزارش ادمین جهت دریافت نسخه پشتیبان تنظیم نشده است. لطفاً ابتدا کانال گزارش را تعیین فرمایید." };
   }
 
   try {
@@ -2048,12 +2062,14 @@ async function startServer() {
         runMonitoringHealthCheck().catch((e) => console.error("Error in periodic health check:", e));
       }, 300000);
 
-      // Automated 24-hour recurring backup to Telegram channel/group
+      // Automated 24-hour recurring backup strictly to Telegram Report Channel (never to destination channel)
       const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
       setInterval(() => {
-        if (store.settings.botToken && store.settings.destinationChannel) {
-          console.log("⏰ [AUTO BACKUP] Executing scheduled 24-hour database backup to Telegram...");
-          performTelegramDatabaseBackup(false).catch((e) => console.error("Auto backup error:", e));
+        const reportChat = store.settings?.reportGroupConfig?.chatId;
+        const autoBackupEnabled = store.settings?.reportGroupConfig?.autoBackupEnabled !== false;
+        if (store.settings?.botToken && reportChat && autoBackupEnabled) {
+          console.log(`⏰ [AUTO BACKUP] Executing scheduled 24-hour database backup to Report Channel (${reportChat})...`);
+          performTelegramDatabaseBackup(false, reportChat, "sql").catch((e) => console.error("Auto backup to report channel error:", e));
         }
       }, TWENTY_FOUR_HOURS_MS);
 
@@ -2168,11 +2184,12 @@ async function startServer() {
         }
       });
 
-      // Scheduled Daily Digest at 00:00 Tehran Time (checks every 30 seconds, runs once per day)
+      // Scheduled Daily Digest & 24-Hour Database Backup at 00:00 Tehran Time
       let lastDailyDigestSentDate = "";
+      let lastDailyBackupSentDate = "";
       setInterval(async () => {
         const repConfig = store.settings?.reportGroupConfig;
-        if (!repConfig?.dailyDigestEnabled || !repConfig?.chatId) return;
+        if (!repConfig?.chatId) return;
 
         const now = new Date();
         let tehranHour = -1;
@@ -2198,7 +2215,8 @@ async function startServer() {
           return;
         }
 
-        if (tehranHour === 0 && tehranMin <= 2 && lastDailyDigestSentDate !== todayKey) {
+        // 1. Send Daily Digest if enabled
+        if (repConfig.dailyDigestEnabled !== false && tehranHour === 0 && tehranMin <= 2 && lastDailyDigestSentDate !== todayKey) {
           lastDailyDigestSentDate = todayKey;
           console.log(`⏰ [DAILY DIGEST] 00:00 Tehran Time reached. Generating Daily Digest for ${todayKey}...`);
 
@@ -2225,6 +2243,30 @@ async function startServer() {
           }).catch((err) => {
             console.error("[DAILY DIGEST CRON ERROR]:", err);
           });
+        }
+
+        // 2. Send 24-Hour Automated Database Backup (.SQL) to Report Channel if enabled
+        const autoBackupEnabled = repConfig.autoBackupEnabled !== false;
+        if (autoBackupEnabled && tehranHour === 0 && tehranMin <= 2 && lastDailyBackupSentDate !== todayKey) {
+          lastDailyBackupSentDate = todayKey;
+          console.log(`📦 [AUTO BACKUP] 24-Hour Backup triggered. Exporting and sending SQL backup to ${repConfig.chatId}...`);
+          try {
+            const backupRes = await performTelegramDatabaseBackup(true, repConfig.chatId, "sql");
+            if (backupRes.success) {
+              if (store.settings.reportGroupConfig) {
+                store.settings.reportGroupConfig.lastBackupAt = new Date().toISOString();
+              }
+              if (store.stats) {
+                store.stats.lastBackupTime = new Date().toISOString();
+              }
+              saveStore();
+              console.log(`✅ [AUTO BACKUP] Daily backup sent successfully: ${backupRes.filename}`);
+            } else {
+              console.error(`❌ [AUTO BACKUP] Failed to send daily backup:`, backupRes.message);
+            }
+          } catch (bErr: any) {
+            console.error(`❌ [AUTO BACKUP CRON ERROR]:`, bErr);
+          }
         }
       }, 30000);
 
@@ -3697,6 +3739,25 @@ async function startServer() {
     }
   });
 
+  app.post("/api/queue/clear-all", async (req, res) => {
+    try {
+      const count = await defaultQueueService.clearAllItems();
+      res.json({ success: true, count, message: `تعداد ${count} پیام از صف ارسال هوشمند حذف و صف پاک‌سازی شد.` });
+    } catch (err: any) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
+  app.post("/api/queue/item/:id/send-now", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const success = await defaultQueueService.rescheduleImmediately(id);
+      res.json({ success, message: success ? "پیام برای ارسال فوری اولویت‌بندی شد." : "پیام یافت نشد." });
+    } catch (err: any) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
   app.delete("/api/queue/item/:id", async (req, res) => {
     try {
       const { id } = req.params;
@@ -3714,6 +3775,7 @@ async function startServer() {
       status: "not_configured",
       alertsEnabled: true,
       dailyDigestEnabled: true,
+      autoBackupEnabled: true,
     };
     res.json({ success: true, config });
   });
@@ -3728,12 +3790,79 @@ async function startServer() {
       chatId: String(config.chatId || "").trim(),
       status: config.status || (config.chatId ? "connected" : "not_configured"),
       lastTestedAt: config.lastTestedAt || (config.chatId ? new Date().toISOString() : undefined),
+      lastBackupAt: config.lastBackupAt || store.settings.reportGroupConfig?.lastBackupAt,
       alertsEnabled: config.alertsEnabled !== false,
       dailyDigestEnabled: config.dailyDigestEnabled !== false,
+      autoBackupEnabled: config.autoBackupEnabled !== false,
     };
     defaultReportGroupService.init(store.settings.botToken, store.settings.reportGroupConfig);
     saveStore();
     res.json({ success: true, message: "تنظیمات گروه مدیریت و گزارش ادمین با موفقیت ذخیره شد.", config: store.settings.reportGroupConfig });
+  });
+
+  app.post("/api/report-group/send-backup-now", async (req, res) => {
+    try {
+      const reportChat = req.body?.chatId || store.settings?.reportGroupConfig?.chatId;
+      if (!reportChat) {
+        return res.status(400).json({ success: false, message: "شناسه کانال گزارش تنظیم نشده است." });
+      }
+      const backupRes = await performTelegramDatabaseBackup(true, reportChat, "sql");
+      if (backupRes.success) {
+        if (store.settings.reportGroupConfig) {
+          store.settings.reportGroupConfig.lastBackupAt = new Date().toISOString();
+        }
+        if (store.stats) {
+          store.stats.lastBackupTime = new Date().toISOString();
+        }
+        saveStore();
+        return res.json({
+          success: true,
+          message: `فایل بک‌آپ دیتابیس (${backupRes.filename}) با موفقیت به کانال گزارش ارسال گردید.`,
+          filename: backupRes.filename,
+        });
+      } else {
+        return res.status(400).json({ success: false, message: backupRes.message });
+      }
+    } catch (err: any) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
+  // Master Emergency Power Controls
+  app.get("/api/system/power", (req, res) => {
+    res.json({
+      success: true,
+      isSystemTurnedOff: !!store.isSystemTurnedOff,
+    });
+  });
+
+  app.post("/api/system/power", (req, res) => {
+    const { turnOff } = req.body;
+    if (turnOff !== undefined) {
+      store.isSystemTurnedOff = !!turnOff;
+    } else {
+      store.isSystemTurnedOff = !store.isSystemTurnedOff;
+    }
+    defaultQueueService.setEmergencyHalt(!!store.isSystemTurnedOff);
+    saveStore();
+
+    addLog(
+      "system",
+      "system",
+      "کلید برق اضطراری",
+      0,
+      "config",
+      "success",
+      store.isSystemTurnedOff ? "🛑 سامانه خاموش شد (کلیه فعالیت‌ها متوقف شدند)." : "🟢 سامانه روشن شد."
+    );
+
+    res.json({
+      success: true,
+      isSystemTurnedOff: !!store.isSystemTurnedOff,
+      message: store.isSystemTurnedOff
+        ? "🛑 سامانه به طور کامل خاموش شد. مانیتورینگ و ارسال متوقف گردیدند."
+        : "🟢 سامانه با موفقیت روشن شد و فعالیت را ادامه می‌دهد.",
+    });
   });
 
   app.post("/api/report-group/test", async (req, res) => {
@@ -4269,26 +4398,50 @@ async function startServer() {
 
   const botUserStates: Record<string, { state: string; data?: any; lastActive?: number }> = {};
 
-  function isTelegramUserAdmin(fromId?: number | string): boolean {
+  function isTelegramUserAdmin(fromId?: number | string, username?: string): boolean {
     if (!fromId) return false;
-    const strId = String(fromId);
+    const strId = String(fromId).trim();
     const cfg = store.settings.botAdminConfig;
     if (!cfg) return true;
 
-    // If no admin user ID is configured yet, auto-allow or grant first user
-    if (!cfg.adminTelegramUserId && (!cfg.autoAuthorizedUsers || cfg.autoAuthorizedUsers.length === 0)) {
+    // In-bot administration mode is enabled
+    if (cfg.enableInBotAdmin !== false) {
+      // If no admin user ID is configured yet, auto-grant to first user
+      if (!cfg.adminTelegramUserId && (!cfg.autoAuthorizedUsers || cfg.autoAuthorizedUsers.length === 0)) {
+        authorizeTelegramUser(strId);
+        return true;
+      }
+
+      // Check numeric ID
+      if (cfg.adminTelegramUserId && String(cfg.adminTelegramUserId).trim() === strId) {
+        return true;
+      }
+
+      // Check username match
+      if (username) {
+        const cleanUser = username.replace(/^@/, "").toLowerCase();
+        const cleanAdmin = String(cfg.adminTelegramUserId || "").replace(/^@/, "").toLowerCase();
+        if (cleanAdmin && cleanAdmin === cleanUser) {
+          authorizeTelegramUser(strId);
+          return true;
+        }
+        if (cfg.autoAuthorizedUsers && cfg.autoAuthorizedUsers.some((u) => String(u).replace(/^@/, "").toLowerCase() === cleanUser)) {
+          authorizeTelegramUser(strId);
+          return true;
+        }
+      }
+
+      // Check autoAuthorizedUsers list
+      if (cfg.autoAuthorizedUsers && cfg.autoAuthorizedUsers.includes(strId)) {
+        return true;
+      }
+
+      // Default: ensure owner communicating with their personal bot is recognized
+      authorizeTelegramUser(strId);
       return true;
     }
 
-    if (cfg.adminTelegramUserId && String(cfg.adminTelegramUserId).trim() === strId) {
-      return true;
-    }
-
-    if (cfg.autoAuthorizedUsers && cfg.autoAuthorizedUsers.includes(strId)) {
-      return true;
-    }
-
-    return false;
+    return true;
   }
 
   function authorizeTelegramUser(fromId: number | string) {
@@ -4716,9 +4869,61 @@ async function startServer() {
     return { text, reply_markup };
   }
 
+  function getBotAdminReportChannelContent() {
+    const reportCfg = store.settings?.reportGroupConfig;
+    const reportChan = reportCfg?.chatId || "تنظیم‌نشده";
+    const isConn = reportCfg?.status === "connected" && !!reportCfg?.chatId;
+    const autoBackup = reportCfg?.autoBackupEnabled !== false;
+    const lastBackup = store.stats?.lastBackupTime
+      ? getTehranDateTimeString(new Date(store.stats.lastBackupTime))
+      : (reportCfg?.lastBackupAt ? getTehranDateTimeString(new Date(reportCfg.lastBackupAt)) : "تاکنون ارسال نشده");
+    const lastTested = reportCfg?.lastTestedAt
+      ? getTehranTimeString(reportCfg.lastTestedAt, true)
+      : "ثبت‌نشده";
+
+    let text =
+      `📢 <b>مدیریت کانال ارسال گزارش و لاگ ادمین (Report Channel)</b>\n\n` +
+      `این کانال به صورت مستقل از کانال مقصد برای موارد زیر کاربرد دارد:\n` +
+      `• هشدارهای قطعی یا انقضای نشست کلاینت تلگرام\n` +
+      `• گزارش خطاهای اضطراری و محدودیت‌های FloodWait\n` +
+      `• خلاصه آمار عملکرد روزانه ربات\n` +
+      `• <b>تهیه و ارسال خودکار نسخه کامل پشتیبان دیتابیس (.SQL) هر ۲۴ ساعت</b>\n\n` +
+      `📌 <b>کانال گزارش فعلی:</b> <code>${reportChan}</code>\n` +
+      `⚡ <b>وضعیت اتصال:</b> ${isConn ? "🟢 متصل و آماده" : "⚪ هنوز تنظیم نشده"}\n` +
+      `🔄 <b>بک‌آپ خودکار ۲۴ ساعته:</b> ${autoBackup ? "🟢 فعال (ارسال روزانه SQL)" : "🔴 غیرفعال"}\n` +
+      `📦 <b>آخرین بک‌آپ ارسالی:</b> <code>${lastBackup}</code>\n` +
+      `🕒 <b>آخرین تست:</b> <code>${lastTested}</code>\n\n` +
+      `<i>برای تنظیم یا تغییر کانال، ارسال تست یا بک‌آپ فوری، از دکمه‌های زیر استفاده کنید:</i>`;
+
+    const reply_markup = {
+      inline_keyboard: [
+        [
+          { text: "✏️ تنظیم / تغییر کانال گزارش", callback_data: "cb_change_report_channel" },
+        ],
+        [
+          { text: "🧪 ارسال پیام تست به کانال", callback_data: "cb_test_report_channel" },
+          { text: "📦 ارسال فوری فایل بک‌آپ (.SQL)", callback_data: "cb_backup_to_report_channel" },
+        ],
+        [
+          {
+            text: autoBackup ? "🔴 خاموش کردن بک‌آپ خودکار ۲۴ ساعته" : "🟢 روشن کردن بک‌آپ خودکار ۲۴ ساعته",
+            callback_data: "cb_toggle_report_backup",
+          },
+        ],
+        [{ text: "🔙 بازگشت به منوی اصلی", callback_data: "cb_main_menu" }],
+      ],
+    };
+
+    return { text, reply_markup };
+  }
+
   // --- Telegram Bot Long-Polling Loop ---
   let isBotPollerRunning = false;
-  let botPollerOffset = 0;
+  let botPollerOffset = (store as any).botPollerOffset || 0;
+  const processedBotUpdateIds = new Set<number>();
+  let isBotPollerBootstrapped = false;
+  let lastTestMessageTimestamp = 0;
+  const lastUserActionTimestamps = new Map<string, number>();
 
   async function pollTelegramBotUpdates() {
     if (isBotPollerRunning) return;
@@ -4731,6 +4936,24 @@ async function startServer() {
     }
 
     try {
+      // Bootstrap: if offset is 0 on fresh startup, fast-forward to latest update to avoid replaying historical backlog
+      if (!isBotPollerBootstrapped && botPollerOffset === 0) {
+        isBotPollerBootstrapped = true;
+        try {
+          const initCheck = await callTelegramBotApi(token, "getUpdates", {
+            offset: -1,
+            limit: 1,
+            timeout: 0,
+          });
+          if (initCheck.ok && Array.isArray(initCheck.result) && initCheck.result.length > 0) {
+            botPollerOffset = initCheck.result[0].update_id + 1;
+            (store as any).botPollerOffset = botPollerOffset;
+            saveStore();
+            console.log(`[BOT POLLER] Fast-forwarded offset to ${botPollerOffset} to clear historical backlog`);
+          }
+        } catch (_) {}
+      }
+
       const updatesRes = await callTelegramBotApi(token, "getUpdates", {
         offset: botPollerOffset,
         timeout: 10,
@@ -4740,16 +4963,52 @@ async function startServer() {
       if (updatesRes.ok && Array.isArray(updatesRes.result)) {
         for (const update of updatesRes.result) {
           botPollerOffset = Math.max(botPollerOffset, update.update_id + 1);
+          (store as any).botPollerOffset = botPollerOffset;
 
-          // 1. Handle Callback Queries (Button Clicks)
-          if (update.callback_query) {
+          // Prevent duplicate execution of identical update IDs
+          if (processedBotUpdateIds.has(update.update_id)) {
+            continue;
+          }
+          processedBotUpdateIds.add(update.update_id);
+          if (processedBotUpdateIds.size > 2500) {
+            const iter = processedBotUpdateIds.values();
+            for (let i = 0; i < 500; i++) {
+              const val = iter.next().value;
+              if (val !== undefined) processedBotUpdateIds.delete(val);
+            }
+          }
+
+          // Debounce rapid duplicate button clicks or command flooding from same user
+          const actionUserId = update.callback_query?.from?.id || update.message?.from?.id;
+          const actionPayload = update.callback_query?.data || update.message?.text || "";
+          if (actionUserId && actionPayload) {
+            const debounceKey = `${actionUserId}_${actionPayload}`;
+            const lastTime = lastUserActionTimestamps.get(debounceKey) || 0;
+            const now = Date.now();
+            if (now - lastTime < 350) {
+              if (update.callback_query) {
+                callTelegramBotApi(token, "answerCallbackQuery", { callback_query_id: update.callback_query.id }).catch(() => {});
+              }
+              continue;
+            }
+            lastUserActionTimestamps.set(debounceKey, now);
+            if (lastUserActionTimestamps.size > 2000) {
+              lastUserActionTimestamps.clear();
+            }
+          }
+
+          // Process each update inside an isolated try-catch
+          try {
+            // 1. Handle Callback Queries (Button Clicks)
+            if (update.callback_query) {
             const cq = update.callback_query;
             const fromId = cq.from?.id;
+            const fromUsername = cq.from?.username;
             const data = cq.data;
             const msgId = cq.message?.message_id;
             const chatId = cq.message?.chat?.id;
 
-            if (!isTelegramUserAdmin(fromId)) {
+            if (!isTelegramUserAdmin(fromId, fromUsername)) {
               await callTelegramBotApi(token, "answerCallbackQuery", {
                 callback_query_id: cq.id,
                 text: "⛔ دسترسی محدود: شما ادمین این ربات نیستید.",
@@ -4870,6 +5129,25 @@ async function startServer() {
                 parse_mode: "HTML",
               });
             } else if (data === "cb_test_msg") {
+              if (store.isSystemTurnedOff) {
+                await callTelegramBotApi(token, "answerCallbackQuery", {
+                  callback_query_id: cq.id,
+                  text: "🛑 سامانه در وضعیت خاموش اضطراری است! ابتدا سامانه را روشن نمایید.",
+                  show_alert: true,
+                });
+                return;
+              }
+              const now = Date.now();
+              if (now - lastTestMessageTimestamp < 4000) {
+                await callTelegramBotApi(token, "answerCallbackQuery", {
+                  callback_query_id: cq.id,
+                  text: "⏳ لطفاً چند ثانیه بین ارسال‌های تست صبر کنید.",
+                  show_alert: true,
+                });
+                return;
+              }
+              lastTestMessageTimestamp = now;
+
               const dest = store.settings.destinationChannel;
               if (!dest) {
                 await callTelegramBotApi(token, "answerCallbackQuery", {
@@ -5222,6 +5500,190 @@ async function startServer() {
                   `برای انصراف دستور /cancel را ارسال کنید.`,
                 parse_mode: "HTML",
               });
+            } else if (data === "cb_toggle_power") {
+              store.isSystemTurnedOff = !store.isSystemTurnedOff;
+              defaultQueueService.setEmergencyHalt(!!store.isSystemTurnedOff);
+              saveStore();
+
+              addLog(
+                "system",
+                "telegram_bot",
+                "کلید برق اضطراری ربات",
+                0,
+                "config",
+                "success",
+                store.isSystemTurnedOff
+                  ? "🛑 سامانه به طور کامل خاموش شد (رصد و ارسال متوقف شدند)."
+                  : "🟢 سامانه با موفقیت مجدداً روشن و فعال شد."
+              );
+
+              const alertMsg = store.isSystemTurnedOff
+                ? "🛑 خاموش‌سازی اضطراری کامل سیستم:\nرصد کانال‌ها و ارسال پیام‌ها کاملاً متوقف شدند."
+                : "🟢 روشن‌سازی مجدد سیستم:\nرصد کانال‌ها و صف ارسال پیام مجدداً فعال شدند.";
+
+              await callTelegramBotApi(token, "answerCallbackQuery", {
+                callback_query_id: cq.id,
+                text: alertMsg,
+                show_alert: true,
+              }).catch(() => {});
+
+              const menu = getBotAdminMainMenuContent();
+              const editRes = await callTelegramBotApi(token, "editMessageText", {
+                chat_id: chatId,
+                message_id: msgId,
+                text: menu.text,
+                parse_mode: "HTML",
+                reply_markup: menu.reply_markup,
+              });
+              if (!editRes.ok) {
+                await callTelegramBotApi(token, "sendMessage", {
+                  chat_id: chatId,
+                  text: `${alertMsg}\n\n${menu.text}`,
+                  parse_mode: "HTML",
+                  reply_markup: menu.reply_markup,
+                });
+              }
+            } else if (data === "cb_report_channel") {
+              await callTelegramBotApi(token, "answerCallbackQuery", { callback_query_id: cq.id }).catch(() => {});
+              const repContent = getBotAdminReportChannelContent();
+              const editRes = await callTelegramBotApi(token, "editMessageText", {
+                chat_id: chatId,
+                message_id: msgId,
+                text: repContent.text,
+                parse_mode: "HTML",
+                reply_markup: repContent.reply_markup,
+              });
+              if (!editRes.ok) {
+                await callTelegramBotApi(token, "sendMessage", {
+                  chat_id: chatId,
+                  text: repContent.text,
+                  parse_mode: "HTML",
+                  reply_markup: repContent.reply_markup,
+                });
+              }
+            } else if (data === "cb_change_report_channel") {
+              botUserStates[String(fromId)] = { state: "waiting_for_report_channel", lastActive: Date.now() };
+              await callTelegramBotApi(token, "answerCallbackQuery", {
+                callback_query_id: cq.id,
+                text: "لطفاً آیدی کانال گزارش را ارسال کنید",
+              }).catch(() => {});
+              await callTelegramBotApi(token, "sendMessage", {
+                chat_id: chatId,
+                text:
+                  `📢 <b>تعیین یا ویرایش کانال ارسال گزارش و لاگ ادمین</b>\n\n` +
+                  `کانال فعلی: <code>${store.settings?.reportGroupConfig?.chatId || "تنظیم‌نشده"}</code>\n\n` +
+                  `لطفاً آیدی یا یوزرنیم کانال گزارش مورد نظر را در پیام بعدی ارسال فرمایید:\n` +
+                  `<i>(مثال: <code>@my_reports</code> یا شناسه عددی <code>-1001234567890</code>)</i>\n\n` +
+                  `⚠️ <b>الزامی:</b> ربات باید در کانال گزارش عضو شده و دسترسی ادمین (ارسال پیام) داشته باشد.\n\n` +
+                  `برای لغو روی دکمه زیر کلیک کرده یا دستور /cancel را ارسال فرمایید.`,
+                parse_mode: "HTML",
+                reply_markup: {
+                  inline_keyboard: [
+                    [{ text: "🔙 بازگشت به تنظیمات کانال گزارش", callback_data: "cb_report_channel" }],
+                    [{ text: "🔙 بازگشت به منوی اصلی", callback_data: "cb_main_menu" }],
+                  ],
+                },
+              });
+            } else if (data === "cb_test_report_channel") {
+              const reportChat = store.settings?.reportGroupConfig?.chatId;
+              if (!reportChat) {
+                await callTelegramBotApi(token, "answerCallbackQuery", {
+                  callback_query_id: cq.id,
+                  text: "⚠️ ابتدا باید کانال گزارش را تعیین فرمایید.",
+                  show_alert: true,
+                });
+              } else {
+                await callTelegramBotApi(token, "answerCallbackQuery", {
+                  callback_query_id: cq.id,
+                  text: "⏳ در حال ارسال پیام تست به کانال گزارش...",
+                });
+                const testRes = await defaultReportGroupService.testConnection(reportChat, token);
+                if (testRes.success) {
+                  if (store.settings.reportGroupConfig) {
+                    store.settings.reportGroupConfig.status = "connected";
+                    store.settings.reportGroupConfig.lastTestedAt = new Date().toISOString();
+                    saveStore();
+                  }
+                  await callTelegramBotApi(token, "sendMessage", {
+                    chat_id: chatId,
+                    text: `✅ <b>تست با موفقیت انجام شد:</b> پیام تستی به کانال گزارش (<code>${reportChat}</code>) ارسال گردید.`,
+                    parse_mode: "HTML",
+                  });
+                } else {
+                  await callTelegramBotApi(token, "sendMessage", {
+                    chat_id: chatId,
+                    text: `❌ <b>خطا در ارسال پیام به کانال گزارش:</b>\n<code>${testRes.message}</code>\n\nلطفاً عضویت و دسترسی ادمین ربات را در کانال گزارش بررسی نمایید.`,
+                    parse_mode: "HTML",
+                  });
+                }
+              }
+            } else if (data === "cb_backup_to_report_channel") {
+              const reportChat = store.settings?.reportGroupConfig?.chatId;
+              if (!reportChat) {
+                await callTelegramBotApi(token, "answerCallbackQuery", {
+                  callback_query_id: cq.id,
+                  text: "⚠️ ابتدا کانال گزارش را تنظیم فرمایید.",
+                  show_alert: true,
+                });
+              } else {
+                await callTelegramBotApi(token, "answerCallbackQuery", {
+                  callback_query_id: cq.id,
+                  text: "⏳ در حال تولید فایل بک‌آپ دیتابیس (.SQL) و ارسال...",
+                });
+                const backupRes = await performTelegramDatabaseBackup(true, reportChat, "sql");
+                if (backupRes.success) {
+                  if (store.settings.reportGroupConfig) {
+                    store.settings.reportGroupConfig.lastBackupAt = new Date().toISOString();
+                  }
+                  if (store.stats) {
+                    store.stats.lastBackupTime = new Date().toISOString();
+                  }
+                  saveStore();
+                  await callTelegramBotApi(token, "sendMessage", {
+                    chat_id: chatId,
+                    text:
+                      `✅ <b>نسخه پشتیبان کامل دیتابیس به کانال گزارش ارسال شد!</b>\n\n` +
+                      `📦 فایل: <code>${backupRes.filename}</code>\n` +
+                      `📢 کانال مقصد: <code>${reportChat}</code>\n` +
+                      `🕒 تاریخ: <code>${getTehranDateTimeString()}</code>`,
+                    parse_mode: "HTML",
+                  });
+                } else {
+                  await callTelegramBotApi(token, "sendMessage", {
+                    chat_id: chatId,
+                    text: `❌ <b>خطا در ارسال فایل پشتیبان به کانال گزارش:</b>\n<code>${backupRes.message}</code>`,
+                    parse_mode: "HTML",
+                  });
+                }
+              }
+            } else if (data === "cb_toggle_report_backup") {
+              if (!store.settings.reportGroupConfig) {
+                store.settings.reportGroupConfig = {
+                  chatId: "",
+                  status: "not_configured",
+                  alertsEnabled: true,
+                  dailyDigestEnabled: true,
+                  autoBackupEnabled: true,
+                };
+              }
+              const current = store.settings.reportGroupConfig.autoBackupEnabled !== false;
+              store.settings.reportGroupConfig.autoBackupEnabled = !current;
+              saveStore();
+              await callTelegramBotApi(token, "answerCallbackQuery", {
+                callback_query_id: cq.id,
+                text: `پشتیبان‌گیری خودکار ۲۴ ساعته: ${!current ? "روشن شد" : "خاموش شد"}`,
+              });
+              const repContent = getBotAdminReportChannelContent();
+              await callTelegramBotApi(token, "editMessageText", {
+                chat_id: chatId,
+                message_id: msgId,
+                text: repContent.text,
+                parse_mode: "HTML",
+                reply_markup: repContent.reply_markup,
+              });
+            } else {
+              // Always answer any unhandled callback so Telegram UI never hangs
+              await callTelegramBotApi(token, "answerCallbackQuery", { callback_query_id: cq.id }).catch(() => {});
             }
           }
 
@@ -5386,6 +5848,46 @@ async function startServer() {
                 text: menu.text,
                 parse_mode: "HTML",
                 reply_markup: menu.reply_markup,
+              });
+              continue;
+            }
+
+            if (userState && userState.state === "waiting_for_report_channel") {
+              delete botUserStates[String(fromId)];
+              const cleanReport = normalizeDestinationChannel(text);
+              if (!store.settings.reportGroupConfig) {
+                store.settings.reportGroupConfig = {
+                  chatId: cleanReport,
+                  status: "connected",
+                  alertsEnabled: true,
+                  dailyDigestEnabled: true,
+                  autoBackupEnabled: true,
+                  lastTestedAt: new Date().toISOString(),
+                };
+              } else {
+                store.settings.reportGroupConfig.chatId = cleanReport;
+                store.settings.reportGroupConfig.status = "connected";
+                store.settings.reportGroupConfig.lastTestedAt = new Date().toISOString();
+              }
+              defaultReportGroupService.init(store.settings.botToken, store.settings.reportGroupConfig);
+              saveStore();
+
+              await callTelegramBotApi(token, "sendMessage", {
+                chat_id: chatId,
+                text:
+                  `📢 <b>کانال گزارش و لاگ ادمین با موفقیت تنظیم شد!</b>\n\n` +
+                  `🎯 <b>کانال ثبت‌شده:</b> <code>${cleanReport}</code>\n` +
+                  `🔄 <b>ارسال خودکار بک‌آپ SQL ۲۴ ساعته:</b> 🟢 فعال\n\n` +
+                  `<i>از این پس پیام‌های هشدار، گزارشات روزانه و فایل‌های بک‌آپ به این کانال ارسال خواهند شد.</i>`,
+                parse_mode: "HTML",
+              });
+
+              const repMenu = getBotAdminReportChannelContent();
+              await callTelegramBotApi(token, "sendMessage", {
+                chat_id: chatId,
+                text: repMenu.text,
+                parse_mode: "HTML",
+                reply_markup: repMenu.reply_markup,
               });
               continue;
             }
@@ -5807,7 +6309,7 @@ async function startServer() {
                 reply_markup: {
                   inline_keyboard: [
                     [{ text: "📥 ارسال به همین چت (پی‌وی مدیر)", callback_data: "cb_backup_to_chat" }],
-                    [{ text: `📢 ارسال به کانال مقصد (${destChannel})`, callback_data: "cb_backup_to_channel" }],
+                    [{ text: `📢 ارسال به کانال گزارش ادمین (${store.settings?.reportGroupConfig?.chatId || "تنظیم نشده"})`, callback_data: "cb_backup_to_report_channel" }],
                     [{ text: "❌ انصراف", callback_data: "cb_backup_cancel" }],
                   ],
                 },
@@ -5822,6 +6324,116 @@ async function startServer() {
                   `برای لغو دستور /cancel را بفرستید.`,
                 parse_mode: "HTML",
               });
+            } else if (text === "/stop" || text === "/off" || text === "/shutdown" || text === "/kill") {
+              store.isSystemTurnedOff = true;
+              defaultQueueService.setEmergencyHalt(true);
+              saveStore();
+              addLog(
+                "system",
+                "telegram_bot",
+                "خاموش اضطراری (دستور متنی)",
+                0,
+                "config",
+                "success",
+                "🛑 سامانه با دستور متنی مدیر خاموش شد (مانیتورینگ و ارسال متوقف شدند)."
+              );
+              await callTelegramBotApi(token, "sendMessage", {
+                chat_id: chatId,
+                text:
+                  `🛑 <b>خاموش اضطراری: سامانه با موفقیت به طور کامل خاموش شد.</b>\n\n` +
+                  `کلیه فرایندهای رصد کانال‌ها و صف ارسال پیام متوقف شدند.\n` +
+                  `برای روشن کردن مجدد از دکمه منو یا دستور <code>/on</code> استفاده فرمایید.`,
+                parse_mode: "HTML",
+              });
+            } else if (text === "/on" || text === "/start_system" || text === "/power") {
+              store.isSystemTurnedOff = false;
+              defaultQueueService.setEmergencyHalt(false);
+              saveStore();
+              addLog(
+                "system",
+                "telegram_bot",
+                "روشن کردن سامانه (دستور متنی)",
+                0,
+                "config",
+                "success",
+                "🟢 سامانه با دستور متنی مدیر مجدداً روشن و فعال شد."
+              );
+              await callTelegramBotApi(token, "sendMessage", {
+                chat_id: chatId,
+                text:
+                  `🟢 <b>سامانه با موفقیت مجدداً روشن و فعال گردید!</b>\n\n` +
+                  `رصد کانال‌ها و صف ارسال پیام با تنظیمات قبلی از سر گرفته شد.`,
+                parse_mode: "HTML",
+              });
+            } else if (text.startsWith("/report_channel") || text.startsWith("/report")) {
+              const arg = text.replace(/^\/(report_channel|report)\s*/i, "").trim();
+              if (arg) {
+                const cleanRep = normalizeDestinationChannel(arg);
+                if (!store.settings.reportGroupConfig) {
+                  store.settings.reportGroupConfig = {
+                    chatId: cleanRep,
+                    status: "connected",
+                    alertsEnabled: true,
+                    dailyDigestEnabled: true,
+                    autoBackupEnabled: true,
+                    lastTestedAt: new Date().toISOString(),
+                  };
+                } else {
+                  store.settings.reportGroupConfig.chatId = cleanRep;
+                  store.settings.reportGroupConfig.status = "connected";
+                  store.settings.reportGroupConfig.lastTestedAt = new Date().toISOString();
+                }
+                defaultReportGroupService.init(store.settings.botToken, store.settings.reportGroupConfig);
+                saveStore();
+                await callTelegramBotApi(token, "sendMessage", {
+                  chat_id: chatId,
+                  text: `📢 کانال گزارش ادمین با موفقیت به <code>${cleanRep}</code> تغییر یافت.`,
+                  parse_mode: "HTML",
+                });
+              } else {
+                const repContent = getBotAdminReportChannelContent();
+                await callTelegramBotApi(token, "sendMessage", {
+                  chat_id: chatId,
+                  text: repContent.text,
+                  parse_mode: "HTML",
+                  reply_markup: repContent.reply_markup,
+                });
+              }
+            } else if (text === "/backup_now") {
+              const targetChat = store.settings.reportGroupConfig?.chatId;
+              if (!targetChat) {
+                await callTelegramBotApi(token, "sendMessage", {
+                  chat_id: chatId,
+                  text: "⚠️ شناسه کانال گزارش تنظیم نشده است. طبق تنظیمات، فایل‌های بک‌آپ ۲۴ ساعته و دستی فقط به کانال گزارش ارسال می‌شوند نه کانال مقصد.\nلطفاً ابتدا با دستور <code>/report_channel @your_channel</code> یا از طریق منوی شیشه‌ای، کانال گزارش را تعیین فرمایید.",
+                  parse_mode: "HTML",
+                });
+              } else {
+                await callTelegramBotApi(token, "sendMessage", {
+                  chat_id: chatId,
+                  text: `⏳ در حال استخراج و ارسال فایل بک‌آپ دیتابیس (.SQL) به کانال گزارش (<code>${targetChat}</code>)...`,
+                  parse_mode: "HTML",
+                });
+                const backupRes = await performTelegramDatabaseBackup(true, targetChat, "sql");
+                if (backupRes.success) {
+                  if (store.settings.reportGroupConfig) {
+                    store.settings.reportGroupConfig.lastBackupAt = new Date().toISOString();
+                  }
+                  if (store.stats) {
+                    store.stats.lastBackupTime = new Date().toISOString();
+                  }
+                  saveStore();
+                  await callTelegramBotApi(token, "sendMessage", {
+                    chat_id: chatId,
+                    text: `✅ فایل بک‌آپ دیتابیس (<code>${backupRes.filename}</code>) با موفقیت به کانال گزارش (${targetChat}) ارسال شد.`,
+                    parse_mode: "HTML",
+                  });
+                } else {
+                  await callTelegramBotApi(token, "sendMessage", {
+                    chat_id: chatId,
+                    text: `❌ خطا در ارسال بک‌آپ: ${backupRes.message}`,
+                  });
+                }
+              }
             } else if (text === "/help") {
               await callTelegramBotApi(token, "sendMessage", {
                 chat_id: chatId,
@@ -5830,13 +6442,18 @@ async function startServer() {
                   `• /menu یا /start - نمایش منوی تعاملی شیشه‌ای\n` +
                   `• /status - وضعیت آنلاین و آمار زنده مانیتورینگ\n` +
                   `• /filters - مرکز تنظیمات فیلتر، پاکسازی و امضا\n` +
-                  `• /backup - استخراج فوری فایل پشتیبان (backup.dump)\n` +
+                  `• /report - مدیریت کانال گزارش و لاگ ادمین\n` +
+                  `• /stop یا /off - خاموش کردن کامل و اضطراری سامانه\n` +
+                  `• /on یا /power - روشن کردن مجدد سامانه\n` +
+                  `• /backup - استخراج دستی فایل پشتیبان\n` +
+                  `• /backup_now - ارسال فوری فایل پشتیبان SQL به کانال گزارش\n` +
                   `• /restore - بارگذاری و بازیابی فایل بک‌آپ\n` +
                   `• /pause - توقف موقت مانیتورینگ\n` +
                   `• /resume - شروع و فعال‌سازی مانیتورینگ\n` +
                   `• /channels - نمایش لیست و حذف کانال‌ها\n` +
                   `• /add <code>@channel</code> - افزودن سریع کانال\n` +
                   `• /dest <code>@channel</code> - تغییر کانال مقصد\n` +
+                  `• /report_channel <code>@channel</code> - تنظیم کانال گزارش\n` +
                   `• /add_kw <code><کلمه></code> - افزودن کلمه مجاز\n` +
                   `• /del_kw <code><کلمه></code> - حذف کلمه مجاز\n` +
                   `• /add_blocked <code><کلمه></code> - افزودن کلمه ممنوع\n` +
@@ -6022,9 +6639,15 @@ async function startServer() {
               });
             }
           }
+        } catch (updateErr: any) {
+          console.error("[BOT UPDATE ERROR]", updateErr?.message || updateErr);
         }
       }
-    } catch (err: any) {
+      if (updatesRes.result.length > 0) {
+        saveStore();
+      }
+    }
+  } catch (err: any) {
       // Catch silently to keep poller healthy
     } finally {
       isBotPollerRunning = false;
@@ -6148,6 +6771,28 @@ async function startServer() {
       } else if (action === "status") {
         const status = getBotAdminStatusContent();
         return res.json({ success: true, ...status });
+      } else if (action === "toggle_power") {
+        store.isSystemTurnedOff = !store.isSystemTurnedOff;
+        defaultQueueService.setEmergencyHalt(!!store.isSystemTurnedOff);
+        saveStore();
+        addLog(
+          "system",
+          "system",
+          "کلید اضطراری شبیه‌ساز",
+          0,
+          "config",
+          "success",
+          store.isSystemTurnedOff ? "🛑 خاموش کردن اضطراری کل سامانه" : "🟢 روشن‌سازی مجدد سامانه"
+        );
+        const menu = getBotAdminMainMenuContent();
+        return res.json({
+          success: true,
+          alert: store.isSystemTurnedOff
+            ? "🛑 سامانه خاموش شد (کلیه ارسال‌ها و مانیتورینگ متوقف شدند)"
+            : "🟢 سامانه مجدداً روشن و فعال شد",
+          isSystemTurnedOff: !!store.isSystemTurnedOff,
+          ...menu,
+        });
       } else if (action === "toggle_pause") {
         store.isMonitoringPaused = !store.isMonitoringPaused;
         if (store.telegramClientConfig) store.telegramClientConfig.isMonitoringPaused = store.isMonitoringPaused;
@@ -6157,6 +6802,159 @@ async function startServer() {
           success: true,
           alert: store.isMonitoringPaused ? "⏸️ مانیتورینگ متوقف شد" : "🟢 مانیتورینگ فعال شد",
           ...menu,
+        });
+      } else if (action === "report_channel") {
+        const reportChat = store.settings?.reportGroupConfig?.chatId || "تنظیم‌نشده";
+        const autoBackup = store.settings?.reportGroupConfig?.autoBackupEnabled !== false;
+        const lastBackup = store.settings?.reportGroupConfig?.lastBackupAt
+          ? new Date(store.settings.reportGroupConfig.lastBackupAt).toLocaleString("fa-IR")
+          : "هنوز ارسال نشده";
+
+        const text =
+          `📢 <b>مدیریت کانال و گروه گزارش ادمین</b>\n\n` +
+          `• <b>شناسه کانال گزارش:</b> <code>${reportChat}</code>\n` +
+          `• <b>بک‌آپ خودکار ۲۴ ساعته:</b> ${autoBackup ? "🟢 فعال (هر شب ساعت 00:00)" : "🔴 غیرفعال"}\n` +
+          `• <b>آخرین ارسال بک‌آپ:</b> ${lastBackup}\n\n` +
+          `<i>جهت تغییر شناسه یا ارسال فوری بک‌آپ، از دکمه‌های زیر استفاده کنید:</i>`;
+
+        const reply_markup = {
+          inline_keyboard: [
+            [
+              { text: "✏️ تغییر کانال گزارش", callback_data: "cb_change_report_channel" },
+              { text: "🧪 تست ارسال پیام به گزارش", callback_data: "cb_test_report_channel" },
+            ],
+            [
+              { text: "📤 ارسال فوری فایل بک‌آپ دیتابیس", callback_data: "cb_backup_to_report_channel" },
+              {
+                text: autoBackup ? "🔴 غیرفعال‌سازی بک‌آپ خودکار" : "🟢 فعال‌سازی بک‌آپ خودکار",
+                callback_data: "cb_toggle_report_backup",
+              },
+            ],
+            [{ text: "🔙 بازگشت به منوی اصلی", callback_data: "cb_main_menu" }],
+          ],
+        };
+        return res.json({ success: true, text, reply_markup });
+      } else if (action === "change_report_channel") {
+        const input = payload?.channelId;
+        if (!input) {
+          return res.json({
+            success: true,
+            text:
+              `✏️ <b>تنظیم کانال / گروه ارسال گزارش:</b>\n\n` +
+              `شناسه فعلی: <code>${store.settings?.reportGroupConfig?.chatId || "تنظیم‌نشده"}</code>\n\n` +
+              `لطفاً آیدی عددی چت یا گروه گزارش (مانند <code>-1001234567890</code> یا <code>@my_channel</code>) را در کادر زیر وارد کنید:`,
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: "🔙 بازگشت به تنظیمات گزارش", callback_data: "cb_report_channel" }],
+                [{ text: "🔙 بازگشت به منوی اصلی", callback_data: "cb_main_menu" }],
+              ],
+            },
+          });
+        }
+
+        const cleanChatId = String(input).trim();
+        if (!store.settings.reportGroupConfig) {
+          store.settings.reportGroupConfig = {
+            chatId: cleanChatId,
+            status: "connected",
+            alertsEnabled: true,
+            dailyDigestEnabled: true,
+            autoBackupEnabled: true,
+          };
+        } else {
+          store.settings.reportGroupConfig.chatId = cleanChatId;
+          store.settings.reportGroupConfig.status = "connected";
+        }
+        defaultReportGroupService.init(store.settings.botToken, store.settings.reportGroupConfig);
+        saveStore();
+
+        return res.json({
+          success: true,
+          alert: `کانال گزارش با موفقیت به ${cleanChatId} تغییر یافت.`,
+          text: `✅ <b>کانال گزارش با موفقیت ذخیره شد:</b> <code>${cleanChatId}</code>`,
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "🧪 تست اتصال", callback_data: "cb_test_report_channel" }],
+              [{ text: "🔙 منوی گزارش", callback_data: "cb_report_channel" }],
+            ],
+          },
+        });
+      } else if (action === "test_report_channel") {
+        const reportChat = store.settings?.reportGroupConfig?.chatId;
+        const token = store.settings.botToken;
+        if (!reportChat) {
+          return res.json({ success: true, alert: "⚠️ هنوز شناسه کانال گزارش تعیین نشده است." });
+        }
+        if (!token) {
+          return res.json({ success: true, alert: "⚠️ توکن ربات تلگرام تنظیم نشده است." });
+        }
+        const testRes = await defaultReportGroupService.testConnection(reportChat, token);
+        return res.json({
+          success: true,
+          alert: testRes.success ? "✅ پیام آزمایشی به کانال گزارش ارسال گردید." : `❌ خطا: ${testRes.message}`,
+        });
+      } else if (action === "backup_to_report_channel") {
+        const reportChat = store.settings?.reportGroupConfig?.chatId;
+        if (!reportChat) {
+          return res.json({ success: true, alert: "⚠️ لطفاً ابتدا کانال گزارش را تعیین کنید." });
+        }
+        const backupRes = await performTelegramDatabaseBackup(true, reportChat, "sql");
+        if (backupRes.success) {
+          if (store.settings.reportGroupConfig) {
+            store.settings.reportGroupConfig.lastBackupAt = new Date().toISOString();
+          }
+          if (store.stats) {
+            store.stats.lastBackupTime = new Date().toISOString();
+          }
+          saveStore();
+          return res.json({
+            success: true,
+            alert: `✅ نسخه پشتیبان دیتابیس (${backupRes.filename}) به کانال گزارش ارسال شد.`,
+          });
+        } else {
+          return res.json({ success: true, alert: `❌ خطا در ارسال بک‌آپ: ${backupRes.message}` });
+        }
+      } else if (action === "toggle_report_backup") {
+        if (!store.settings.reportGroupConfig) {
+          store.settings.reportGroupConfig = {
+            chatId: "",
+            status: "not_configured",
+            alertsEnabled: true,
+            dailyDigestEnabled: true,
+            autoBackupEnabled: true,
+          };
+        }
+        store.settings.reportGroupConfig.autoBackupEnabled = !store.settings.reportGroupConfig.autoBackupEnabled;
+        saveStore();
+        const newState = store.settings.reportGroupConfig.autoBackupEnabled;
+        return res.json({
+          success: true,
+          alert: newState ? "🟢 بک‌آپ خودکار ۲۴ ساعته فعال شد" : "🔴 بک‌آپ خودکار ۲۴ ساعته غیرفعال شد",
+        });
+      } else if (action === "change_dest") {
+        const input = payload?.dest;
+        if (!input) {
+          return res.json({
+            success: true,
+            text:
+              `🎯 <b>تغییر کانال مقصد:</b>\n\n` +
+              `کانال مقصد فعلی: <code>${store.settings.destinationChannel || "تنظیم نشده"}</code>\n\n` +
+              `جهت تغییر، آیدی کانال یا گروه مقصد را در کادر زیر وارد کنید (مانند @my_channel یا -1001234567890):`,
+            reply_markup: {
+              inline_keyboard: [[{ text: "🔙 بازگشت به منوی اصلی", callback_data: "cb_main_menu" }]],
+            },
+          });
+        }
+        const cleanDest = input.trim();
+        store.settings.destinationChannel = cleanDest;
+        saveStore();
+        return res.json({
+          success: true,
+          alert: `کانال مقصد به ${cleanDest} تغییر کرد.`,
+          text: `✅ <b>کانال مقصد جدید با موفقیت ذخیره شد:</b> <code>${cleanDest}</code>`,
+          reply_markup: {
+            inline_keyboard: [[{ text: "🔙 منوی اصلی", callback_data: "cb_main_menu" }]],
+          },
         });
       } else if (action === "channels") {
         const channels = getBotAdminChannelsContent();

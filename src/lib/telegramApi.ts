@@ -359,6 +359,14 @@ export async function clearFailedQueue(): Promise<{ success: boolean; count: num
   return safeFetchJson("/api/queue/clear-failed", { method: "POST" }, { success: false, count: 0, message: "" });
 }
 
+export async function clearAllQueue(): Promise<{ success: boolean; count: number; message: string }> {
+  return safeFetchJson("/api/queue/clear-all", { method: "POST" }, { success: false, count: 0, message: "" });
+}
+
+export async function sendQueueItemNow(id: string): Promise<{ success: boolean; message: string }> {
+  return safeFetchJson(`/api/queue/item/${encodeURIComponent(id)}/send-now`, { method: "POST" }, { success: false, message: "" });
+}
+
 export async function deleteQueueItem(id: string): Promise<{ success: boolean; message: string }> {
   return safeFetchJson(`/api/queue/item/${encodeURIComponent(id)}`, { method: "DELETE" }, { success: false, message: "" });
 }
@@ -389,6 +397,27 @@ export async function testReportGroup(chatId?: string): Promise<{ success: boole
 
 export async function sendDailyDigestNow(): Promise<{ success: boolean; message: string }> {
   return safeFetchJson("/api/report-group/send-digest-now", { method: "POST" }, { success: false, message: "" });
+}
+
+// System Master Emergency Power APIs
+export async function getSystemPower(): Promise<{ success: boolean; isSystemTurnedOff: boolean }> {
+  return safeFetchJson("/api/system/power", undefined, { success: false, isSystemTurnedOff: false });
+}
+
+export async function toggleSystemPower(turnOff?: boolean): Promise<{ success: boolean; isSystemTurnedOff: boolean; message: string }> {
+  return safeFetchJson("/api/system/power", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ turnOff, isSystemTurnedOff: turnOff }),
+  }, { success: false, isSystemTurnedOff: false, message: "" });
+}
+
+export async function sendBackupToReportChannel(chatId?: string): Promise<{ success: boolean; message: string }> {
+  return safeFetchJson("/api/report-group/send-backup-now", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chatId }),
+  }, { success: false, message: "" });
 }
 
 

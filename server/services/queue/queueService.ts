@@ -233,6 +233,9 @@ export class QueueService {
     mediaFileId?: string;
     mediaMetadata?: any;
   }): Promise<QueueItem> {
+    if (this.isEmergencyHalted) {
+      throw new Error("سامانه در وضعیت خاموش اضطراری قرار دارد.");
+    }
     const id = `msg_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
     const now = new Date();
     const delaySeconds = this.calculateRandomDelaySeconds();
@@ -515,6 +518,33 @@ export class QueueService {
     return Math.max(count, dbCount);
   }
 
+  public async clearAllItems(): Promise<number> {
+    let count = 0;
+    for (const [id, item] of this.inMemoryQueue.entries()) {
+      if (item.status === 'scheduled' || item.status === 'pending' || item.status === 'failed') {
+        this.inMemoryQueue.delete(id);
+        count++;
+      }
+    }
+    try {
+      await clearFailedQueueItemsFromDb();
+    } catch (_) {}
+    return count;
+  }
+
+  public async rescheduleImmediately(id: string): Promise<boolean> {
+    const item = this.inMemoryQueue.get(id);
+    if (!item) return false;
+    item.scheduledTime = new Date().toISOString();
+    item.status = 'scheduled';
+    item.updatedAt = new Date().toISOString();
+    await updateQueueItemInDb(item.id, {
+      scheduledTime: item.scheduledTime,
+      status: 'scheduled',
+    });
+    return true;
+  }
+
   public async deleteItem(id: string): Promise<boolean> {
     this.inMemoryQueue.delete(id);
     await deleteQueueItemFromDb(id);
@@ -568,6 +598,7 @@ export class QueueService {
       failedCount,
       totalQueued: pendingCount + scheduledCount + sendingCount,
       isQueuePaused: this.settings.isQueuePaused,
+      isEmergencyHalted: this.isEmergencyHalted,
       nextScheduledItemTime,
       floodWaitActiveUntil: this.floodWaitUntil > now ? new Date(this.floodWaitUntil).toISOString() : undefined,
       currentRatePerMinute,

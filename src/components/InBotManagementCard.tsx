@@ -21,9 +21,13 @@ import {
   Lock,
   Copy,
   Check,
+  Power,
+  AlertOctagon,
+  Zap,
 } from "lucide-react";
 import { BotAdminConfig, BotSettings } from "../types";
 import { formatTehranTime } from "../lib/timeUtils";
+import { toggleSystemPower, getSystemPower } from "../lib/telegramApi";
 
 interface InBotManagementCardProps {
   settings: BotSettings;
@@ -56,6 +60,11 @@ export const InBotManagementCard: React.FC<InBotManagementCardProps> = ({
   const [saveSuccess, setSaveSuccess] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
 
+  // Master Emergency Power Switch
+  const [isSystemTurnedOff, setIsSystemTurnedOff] = useState<boolean>(!!settings?.isSystemTurnedOff);
+  const [isTogglingPower, setIsTogglingPower] = useState<boolean>(false);
+  const [pendingPromptType, setPendingPromptType] = useState<"report_channel" | "dest" | "add_channel" | null>(null);
+
   // Direct Test to Admin Telegram
   const [isSendingToAdmin, setIsSendingToAdmin] = useState<boolean>(false);
   const [adminSendStatus, setAdminSendStatus] = useState<{ success: boolean; message: string } | null>(null);
@@ -72,9 +81,19 @@ export const InBotManagementCard: React.FC<InBotManagementCardProps> = ({
     setLocalPaused(initialPaused);
   }, [initialPaused]);
 
-  // Fetch Bot Admin Config
+  useEffect(() => {
+    if (settings?.isSystemTurnedOff !== undefined) {
+      setIsSystemTurnedOff(!!settings.isSystemTurnedOff);
+    }
+  }, [settings?.isSystemTurnedOff]);
+
+  // Fetch Bot Admin Config & Power Status
   const fetchConfig = async () => {
     try {
+      const pRes = await getSystemPower();
+      if (pRes?.success) {
+        setIsSystemTurnedOff(!!pRes.isSystemTurnedOff);
+      }
       const res = await fetch("/api/bot-admin/config");
       const data = await res.json();
       if (data.success) {
@@ -96,6 +115,24 @@ export const InBotManagementCard: React.FC<InBotManagementCardProps> = ({
     fetchConfig();
     initSimulator();
   }, []);
+
+  // Handle Emergency Power Toggle from UI
+  const handleToggleEmergencyPower = async () => {
+    setIsTogglingPower(true);
+    try {
+      const nextState = !isSystemTurnedOff;
+      const res = await toggleSystemPower(nextState);
+      if (res.success) {
+        setIsSystemTurnedOff(res.isSystemTurnedOff);
+        await initSimulator();
+        if (onRefreshData) onRefreshData();
+      }
+    } catch (err) {
+      console.error("Failed to toggle emergency power:", err);
+    } finally {
+      setIsTogglingPower(false);
+    }
+  };
 
   // Initialize Simulator with Main Menu
   const initSimulator = async () => {
@@ -218,6 +255,11 @@ export const InBotManagementCard: React.FC<InBotManagementCardProps> = ({
           if (onRefreshData) onRefreshData();
         }
 
+        if (actionType === "toggle_power" && data.isSystemTurnedOff !== undefined) {
+          setIsSystemTurnedOff(!!data.isSystemTurnedOff);
+          if (onRefreshData) onRefreshData();
+        }
+
         const newMsg: ChatMessage = {
           id: `bot_${Date.now()}`,
           sender: "bot",
@@ -248,16 +290,44 @@ export const InBotManagementCard: React.FC<InBotManagementCardProps> = ({
     setSimInput("");
 
     if (cmd === "/start" || cmd === "/menu" || cmd === "/admin") {
+      setPendingPromptType(null);
       handleSimAction("menu", undefined, cmd);
     } else if (cmd === "/status") {
       handleSimAction("status", undefined, cmd);
     } else if (cmd === "/pause" || cmd === "/resume") {
       handleSimAction("toggle_pause", undefined, cmd);
+    } else if (cmd === "/stop" || cmd === "/off" || cmd === "/shutdown" || cmd === "/kill") {
+      handleSimAction("toggle_power", { turnOff: true }, cmd);
+    } else if (cmd === "/on" || cmd === "/start_system" || cmd === "/power") {
+      handleSimAction("toggle_power", { turnOff: false }, cmd);
+    } else if (cmd === "/report" || cmd === "/report_channel") {
+      handleSimAction("report_channel", undefined, cmd);
+    } else if (cmd === "/backup" || cmd === "/backup_now") {
+      handleSimAction("backup_to_report_channel", undefined, cmd);
     } else if (cmd === "/channels") {
       handleSimAction("channels", undefined, cmd);
     } else if (cmd.startsWith("/add")) {
       const ch = cmd.replace(/^\/add\s*/, "").trim();
       handleSimAction("add_channel", { channel: ch }, cmd);
+    } else if (cmd.startsWith("/dest")) {
+      const dst = cmd.replace(/^\/dest\s*/, "").trim();
+      handleSimAction("change_dest", { dest: dst }, cmd);
+    } else if (pendingPromptType === "report_channel" || cmd.startsWith("-100")) {
+      handleSimAction("change_report_channel", { channelId: cmd }, cmd);
+      setPendingPromptType(null);
+    } else if (pendingPromptType === "dest") {
+      handleSimAction("change_dest", { dest: cmd }, cmd);
+      setPendingPromptType(null);
+    } else if (pendingPromptType === "add_channel") {
+      handleSimAction("add_channel", { channel: cmd }, cmd);
+      setPendingPromptType(null);
+    } else if (cmd.startsWith("@")) {
+      if (pendingPromptType === "report_channel") {
+        handleSimAction("change_report_channel", { channelId: cmd }, cmd);
+        setPendingPromptType(null);
+      } else {
+        handleSimAction("add_channel", { channel: cmd }, cmd);
+      }
     } else if (cmd === "/test") {
       handleSimAction("test_msg", undefined, cmd);
     } else if (cmd === "/logs") {
@@ -333,6 +403,70 @@ export const InBotManagementCard: React.FC<InBotManagementCardProps> = ({
             </a>
           )}
         </div>
+      </div>
+
+      {/* Master Emergency Power Banner */}
+      <div
+        className={`p-4 sm:p-5 rounded-2xl border transition-all mb-6 flex flex-col sm:flex-row items-center justify-between gap-4 ${
+          isSystemTurnedOff
+            ? "bg-rose-950/70 border-rose-500 shadow-xl shadow-rose-950/60 ring-2 ring-rose-500/40"
+            : "bg-slate-950/70 border-emerald-500/40 shadow-lg shadow-emerald-950/20"
+        }`}
+      >
+        <div className="flex items-center gap-3.5 w-full sm:w-auto">
+          <div
+            className={`w-12 h-12 rounded-2xl flex items-center justify-center text-xl shrink-0 ${
+              isSystemTurnedOff
+                ? "bg-rose-600/30 border border-rose-500 text-rose-300 animate-pulse"
+                : "bg-emerald-600/20 border border-emerald-500/50 text-emerald-400"
+            }`}
+          >
+            {isSystemTurnedOff ? <AlertOctagon className="w-6 h-6 text-rose-400" /> : <Power className="w-6 h-6 text-emerald-400" />}
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <h3 className="text-sm sm:text-base font-black text-white">
+                {isSystemTurnedOff
+                  ? "کل سامانه در وضعیت خاموشی کامل اضطراری (OFF) قرار دارد"
+                  : "کل سامانه روشن و کلیه خدمات تبادل پیام فعال است (ON)"}
+              </h3>
+              <span
+                className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
+                  isSystemTurnedOff
+                    ? "bg-rose-500 text-white animate-pulse"
+                    : "bg-emerald-500/20 text-emerald-400 border border-emerald-500/40"
+                }`}
+              >
+                {isSystemTurnedOff ? "🛑 خاموش" : "🟢 روشن و فعال"}
+              </span>
+            </div>
+            <p className="text-xs text-slate-300 mt-1">
+              {isSystemTurnedOff
+                ? "در این حالت اضطراری، هیچ پیامی رصد، صف‌بندی یا ارسال نمی‌شود. سرور فوروارد کاملاً متوقف است."
+                : "ربات و کلاینت تلگرام در حال پایش پیام‌های مبدا و ارسال زمان‌بندی‌شده به کانال مقصد هستند."}
+            </p>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={handleToggleEmergencyPower}
+          disabled={isTogglingPower}
+          className={`w-full sm:w-auto px-5 py-3 rounded-xl text-xs font-black shadow-lg transition-all active:scale-95 flex items-center justify-center gap-2 shrink-0 ${
+            isSystemTurnedOff
+              ? "bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white border border-emerald-400 shadow-emerald-900/40"
+              : "bg-gradient-to-r from-rose-600 to-red-600 hover:from-rose-500 hover:to-red-500 text-white border border-rose-400 shadow-rose-900/40"
+          }`}
+        >
+          {isTogglingPower ? (
+            <RefreshCw className="w-4 h-4 animate-spin" />
+          ) : isSystemTurnedOff ? (
+            <Power className="w-4 h-4 text-emerald-200" />
+          ) : (
+            <AlertOctagon className="w-4 h-4 text-rose-200" />
+          )}
+          <span>{isSystemTurnedOff ? "🟢 روشن کردن مجدد سامانه" : "🛑 خاموش کردن اضطراری کل سیستم"}</span>
+        </button>
       </div>
 
       {/* Main Grid: Left = Telegram Simulator & Keyboards, Right = Config & Help */}
@@ -418,7 +552,10 @@ export const InBotManagementCard: React.FC<InBotManagementCardProps> = ({
                       <div key={`row_${rIdx}`} className="grid gap-1.5" style={{ gridTemplateColumns: `repeat(${row.length}, minmax(0, 1fr))` }}>
                         {row.map((btn, bIdx) => {
                           const isPauseToggle = btn.callback_data === "cb_toggle_pause";
+                          const isPowerToggle = btn.callback_data === "cb_toggle_power";
                           const isDeleteBtn = btn.callback_data.startsWith("cb_del_src_");
+                          const isReportChannelBtn = btn.callback_data === "cb_report_channel";
+                          const isBackupBtn = btn.callback_data === "cb_backup" || btn.callback_data === "cb_backup_to_report_channel";
 
                           return (
                             <button
@@ -428,6 +565,22 @@ export const InBotManagementCard: React.FC<InBotManagementCardProps> = ({
                                 if (isDeleteBtn) {
                                   const srcId = btn.callback_data.replace("cb_del_src_", "");
                                   handleSimAction("del_channel", { sourceId: srcId }, btn.text);
+                                } else if (btn.callback_data === "cb_toggle_power") {
+                                  handleSimAction("toggle_power", undefined, btn.text);
+                                } else if (btn.callback_data === "cb_report_channel") {
+                                  handleSimAction("report_channel", undefined, btn.text);
+                                } else if (btn.callback_data === "cb_change_report_channel") {
+                                  setPendingPromptType("report_channel");
+                                  handleSimAction("change_report_channel", undefined, btn.text);
+                                } else if (btn.callback_data === "cb_test_report_channel") {
+                                  handleSimAction("test_report_channel", undefined, btn.text);
+                                } else if (btn.callback_data === "cb_backup_to_report_channel") {
+                                  handleSimAction("backup_to_report_channel", undefined, btn.text);
+                                } else if (btn.callback_data === "cb_toggle_report_backup") {
+                                  handleSimAction("toggle_report_backup", undefined, btn.text);
+                                } else if (btn.callback_data === "cb_change_dest") {
+                                  setPendingPromptType("dest");
+                                  handleSimAction("change_dest", undefined, btn.text);
                                 } else if (btn.callback_data === "cb_status") {
                                   handleSimAction("status", undefined, btn.text);
                                 } else if (btn.callback_data === "cb_toggle_pause") {
@@ -435,28 +588,38 @@ export const InBotManagementCard: React.FC<InBotManagementCardProps> = ({
                                 } else if (btn.callback_data === "cb_channels") {
                                   handleSimAction("channels", undefined, btn.text);
                                 } else if (btn.callback_data === "cb_add_channel") {
+                                  setPendingPromptType("add_channel");
                                   handleSimAction("add_channel", undefined, btn.text);
-                                } else if (btn.callback_data === "cb_change_dest") {
-                                  handleSimAction("menu", undefined, btn.text);
                                 } else if (btn.callback_data === "cb_test_msg") {
                                   handleSimAction("test_msg", undefined, btn.text);
                                 } else if (btn.callback_data === "cb_filters_menu") {
                                   handleSimAction("filters", undefined, btn.text);
                                 } else if (btn.callback_data === "cb_logs") {
                                   handleSimAction("logs", undefined, btn.text);
+                                } else if (btn.callback_data === "cb_backup") {
+                                  handleSimAction("backup_to_report_channel", undefined, btn.text);
                                 } else if (btn.callback_data === "cb_main_menu") {
+                                  setPendingPromptType(null);
                                   handleSimAction("menu", undefined, btn.text);
                                 } else {
                                   handleSimAction("menu", undefined, btn.text);
                                 }
                               }}
                               className={`py-2 px-2.5 text-xs font-semibold rounded-xl transition-all active:scale-95 flex items-center justify-center gap-1.5 border shadow-sm ${
-                                isPauseToggle
+                                isPowerToggle
+                                  ? isSystemTurnedOff
+                                    ? "bg-emerald-600/30 hover:bg-emerald-600/40 text-emerald-300 border-emerald-500 animate-pulse font-bold"
+                                    : "bg-rose-600/30 hover:bg-rose-600/40 text-rose-300 border-rose-500 font-bold"
+                                  : isPauseToggle
                                   ? localPaused
                                     ? "bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border-emerald-500/40"
                                     : "bg-amber-600/20 hover:bg-amber-600/30 text-amber-400 border-amber-500/40"
                                   : isDeleteBtn
                                   ? "bg-rose-600/15 hover:bg-rose-600/25 text-rose-300 border-rose-500/30"
+                                  : isReportChannelBtn
+                                  ? "bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border-indigo-500/40"
+                                  : isBackupBtn
+                                  ? "bg-teal-600/20 hover:bg-teal-600/30 text-teal-300 border-teal-500/40"
                                   : "bg-slate-800/90 hover:bg-slate-700 text-slate-200 hover:text-white border-slate-700"
                               }`}
                             >
@@ -484,6 +647,32 @@ export const InBotManagementCard: React.FC<InBotManagementCardProps> = ({
             <span className="text-[11px] text-slate-400 flex items-center gap-1 px-1">
               دستورات سریع:
             </span>
+            <button
+              type="button"
+              onClick={() => handleSimAction("toggle_power", undefined, isSystemTurnedOff ? "/on" : "/stop")}
+              className={`text-[11px] px-2.5 py-1 rounded-lg border font-bold transition flex items-center gap-1 ${
+                isSystemTurnedOff
+                  ? "bg-emerald-600/30 hover:bg-emerald-600/40 text-emerald-300 border-emerald-500/50 animate-pulse"
+                  : "bg-rose-600/30 hover:bg-rose-600/40 text-rose-300 border-rose-500/50"
+              }`}
+            >
+              <Power className="w-3 h-3" />
+              <span>{isSystemTurnedOff ? "روشن‌سازی (/on)" : "خاموشی (/stop)"}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSimAction("report_channel", undefined, "/report")}
+              className="text-[11px] px-2 py-1 bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 rounded-lg border border-indigo-500/40 transition"
+            >
+              📢 کانال گزارش (/report)
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSimAction("backup_to_report_channel", undefined, "/backup_now")}
+              className="text-[11px] px-2 py-1 bg-teal-600/20 hover:bg-teal-600/30 text-teal-300 rounded-lg border border-teal-500/40 transition"
+            >
+              📤 ارسال بک‌آپ
+            </button>
             <button
               type="button"
               onClick={() => handleSimAction("status", undefined, "/status")}

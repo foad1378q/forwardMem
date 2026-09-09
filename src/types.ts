@@ -108,6 +108,7 @@ export interface QueueStats {
   failedCount: number;
   totalQueued: number;
   isQueuePaused: boolean;
+  isEmergencyHalted?: boolean;
   nextScheduledItemTime?: string;
   floodWaitActiveUntil?: string;
   currentRatePerMinute: number;
@@ -222,6 +223,7 @@ export interface DataStore {
   telegramClientConfig: TelegramClientConfig;
   telegramSession: string;
   isMonitoringPaused: boolean;
+  isSystemTurnedOff?: boolean;
   settings: BotSettings;
   sources: SourceChannel[];
   logs: ActivityLog[];
