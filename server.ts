@@ -49,6 +49,7 @@ import { NewMessage, NewMessageEvent } from "telegram/events/index.js";
 import { computeCheck } from "telegram/Password.js";
 import { defaultQueueService, QueueItem } from "./server/services/queue/queueService.js";
 import { defaultReportGroupService } from "./server/services/reporting/reportGroupService.js";
+import { defaultSystemHealthService } from "./server/services/systemHealth/systemHealthService.js";
 import {
   AdminConfig,
   BotSettings,
@@ -59,6 +60,12 @@ import {
   TelegramMediaItem,
   TelegramClientConfig,
   AiProcessingConfig,
+  ReactionSettings,
+  InteractiveButtonsSettings,
+  AdBannerSettings,
+  HourlyActivityPoint,
+  SystemHealthMetrics,
+  SystemHealthPoint,
 } from "./src/types.js";
 import {
   initDatabase,
@@ -422,6 +429,35 @@ let store: DataStore = {
     enableGlobalKeywords: false,
     globalKeywordMatchMode: "any",
     aiProcessing: DEFAULT_AI_PROCESSING,
+    reactionSettings: {
+      enableReactions: true,
+      emojis: ["👍", "❤️", "🔥", "👏"],
+      allowMultiple: false,
+      totalReactionsCount: 0,
+    },
+    interactiveButtonsSettings: {
+      enableButtons: true,
+      enableChannelJoinButton: true,
+      channelJoinText: "📢 عضویت در کانال",
+      channelJoinUrl: "",
+      enableShareButton: true,
+      shareText: "🔄 اشتراک‌گذاری پست",
+      customButtons: [],
+    },
+    adBannerSettings: {
+      enableAdBanner: false,
+      triggerMode: "interval",
+      postInterval: 10,
+      hourInterval: 6,
+      adText: "📢 <b>حامی مالی کانال</b>\n\nجهت رزرو تبلیغات و درج بنر در کانال با پشتیبانی در ارتباط باشید.\n🌐 <i>بازدید بالا و بازدهی عالی</i>",
+      adMediaUrl: "",
+      adButtonText: "💬 ارتباط با بخش تبلیغات",
+      adButtonUrl: "",
+      pinAdMessage: false,
+      postsSinceLastAd: 0,
+      totalAdsSent: 0,
+      lastAdSentAt: undefined,
+    },
     botAdminConfig: {
       adminTelegramUserId: "",
       adminPasscode: "admin123",
@@ -519,20 +555,31 @@ function cleanChannelIdentifier(input: string | null | undefined): string {
 }
 
 // Telegram Bot API Helper (HTTP)
-async function callTelegramBotApi(token: string, method: string, payload?: Record<string, any>) {
+async function callTelegramBotApi(token: string, method: string, payload?: Record<string, any>, timeoutMs: number = 25000) {
   try {
     if (!token || !token.trim()) {
-      console.error("[TELEGRAM BOT API] Missing token.");
       return { ok: false, error_code: 401, description: "Missing BOT_TOKEN" };
     }
     const url = `https://api.telegram.org/bot${token}/${method}`;
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: payload ? JSON.stringify(payload) : undefined,
-    });
-    return await response.json();
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: payload ? JSON.stringify(payload) : undefined,
+        signal: controller.signal,
+      });
+      return await response.json();
+    } finally {
+      clearTimeout(timeoutId);
+    }
   } catch (err: any) {
+    if (method === "getUpdates") {
+      // In background polling, transient network drops/timeouts are normal; handle gracefully without noisy console.error
+      return { ok: false, error_code: 500, description: err?.message || "Network request failed" };
+    }
     console.error(`[TELEGRAM BOT API ERROR] Method ${method} failed:`, err?.message || err);
     return { ok: false, error_code: 500, description: err?.message || "Network request failed" };
   }
@@ -597,7 +644,8 @@ async function sendBotMedia(
   filename: string,
   field: string,
   caption?: string,
-  parseMode: string = "HTML"
+  parseMode: string = "HTML",
+  replyMarkup?: any
 ) {
   try {
     if (!token || !token.trim()) {
@@ -611,6 +659,9 @@ async function sendBotMedia(
     if (caption) {
       formData.append("caption", caption);
       formData.append("parse_mode", parseMode);
+    }
+    if (replyMarkup) {
+      formData.append("reply_markup", JSON.stringify(replyMarkup));
     }
     formData.append(field, new Blob([buffer]), filename);
 
@@ -626,6 +677,9 @@ async function sendBotMedia(
       const retryForm = new FormData();
       retryForm.append("chat_id", cleanDestination);
       retryForm.append("caption", caption);
+      if (replyMarkup) {
+        retryForm.append("reply_markup", JSON.stringify(replyMarkup));
+      }
       retryForm.append(field, new Blob([buffer]), filename);
       const retryRes = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
         method: "POST",
@@ -638,6 +692,224 @@ async function sendBotMedia(
   } catch (err: any) {
     console.error(`[TELEGRAM MEDIA ERROR] Method ${method} failed:`, err?.message || err);
     return { ok: false, error_code: 500, description: err?.message || "خطا در آپلود رسانه به تلگرام" };
+  }
+}
+
+// Default Configuration Constants for Engagement & Promotion
+export const DEFAULT_REACTION_SETTINGS: ReactionSettings = {
+  enableReactions: true,
+  emojis: ["👍", "❤️", "🔥", "👏"],
+  allowMultiple: false,
+  totalReactionsCount: 0,
+};
+
+export const DEFAULT_INTERACTIVE_BUTTONS_SETTINGS: InteractiveButtonsSettings = {
+  enableButtons: true,
+  enableChannelJoinButton: true,
+  channelJoinText: "📢 عضویت در کانال",
+  channelJoinUrl: "",
+  enableShareButton: true,
+  shareText: "🔄 اشتراک‌گذاری پست",
+  customButtons: [],
+};
+
+export const DEFAULT_AD_BANNER_SETTINGS: AdBannerSettings = {
+  enableAdBanner: false,
+  triggerMode: "interval",
+  postInterval: 10,
+  hourInterval: 6,
+  adText: "📢 <b>حامی مالی کانال</b>\n\nجهت رزرو تبلیغات و درج بنر در کانال با پشتیبانی در ارتباط باشید.\n🌐 <i>بازدید بالا و بازدهی عالی</i>",
+  adMediaUrl: "",
+  adButtonText: "💬 ارتباط با بخش تبلیغات",
+  adButtonUrl: "",
+  pinAdMessage: false,
+  postsSinceLastAd: 0,
+  totalAdsSent: 0,
+  lastAdSentAt: undefined,
+};
+
+function buildPostInlineKeyboard(chatId: string, messageId?: number) {
+  const rxConfig = store.settings?.reactionSettings || DEFAULT_REACTION_SETTINGS;
+  const btnConfig = store.settings?.interactiveButtonsSettings || DEFAULT_INTERACTIVE_BUTTONS_SETTINGS;
+  const rows: any[][] = [];
+
+  // 1. Reactions Row (Interactive Emoji Counters)
+  if (rxConfig.enableReactions && Array.isArray(rxConfig.emojis) && rxConfig.emojis.length > 0) {
+    const rxKey = `${chatId}_${messageId || 0}`;
+    const counts = (store as any).reactionCounts?.[rxKey] || {};
+    const rxRow: any[] = [];
+    rxConfig.emojis.forEach((emoji, idx) => {
+      const c = counts[emoji] || 0;
+      const countLabel = c > 0 ? ` ${c}` : "";
+      rxRow.push({
+        text: `${emoji}${countLabel}`,
+        callback_data: `rx_${idx}_${messageId || 0}`,
+      });
+    });
+    if (rxRow.length > 0) {
+      rows.push(rxRow);
+    }
+  }
+
+  // 2. Interactive Buttons (Join channel & Share)
+  if (btnConfig.enableButtons) {
+    const actionRow: any[] = [];
+    if (btnConfig.enableChannelJoinButton) {
+      let joinUrl = btnConfig.channelJoinUrl?.trim();
+      if (!joinUrl) {
+        const dest = store.settings?.destinationChannel;
+        if (dest && dest.startsWith("@")) {
+          joinUrl = `https://t.me/${dest.replace("@", "")}`;
+        }
+      }
+      if (joinUrl) {
+        actionRow.push({
+          text: btnConfig.channelJoinText || "📢 عضویت در کانال",
+          url: joinUrl,
+        });
+      }
+    }
+
+    if (btnConfig.enableShareButton) {
+      let shareTarget = "";
+      const dest = store.settings?.destinationChannel;
+      if (dest && dest.startsWith("@") && messageId) {
+        shareTarget = `https://t.me/${dest.replace("@", "")}/${messageId}`;
+      } else if (dest && dest.startsWith("@")) {
+        shareTarget = `https://t.me/${dest.replace("@", "")}`;
+      }
+      const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(shareTarget || "https://t.me")}&text=${encodeURIComponent("مشاهده در کانال")}`;
+      actionRow.push({
+        text: btnConfig.shareText || "🔄 بازنشر",
+        url: shareUrl,
+      });
+    }
+
+    if (actionRow.length > 0) {
+      rows.push(actionRow);
+    }
+
+    // 3. Custom Interactive Buttons (arranged up to 2 per row)
+    if (Array.isArray(btnConfig.customButtons) && btnConfig.customButtons.length > 0) {
+      let currentRow: any[] = [];
+      btnConfig.customButtons.forEach((btn) => {
+        if (btn.text && btn.url) {
+          currentRow.push({
+            text: btn.text.trim(),
+            url: btn.url.trim(),
+          });
+          if (currentRow.length >= 2) {
+            rows.push(currentRow);
+            currentRow = [];
+          }
+        }
+      });
+      if (currentRow.length > 0) {
+        rows.push(currentRow);
+      }
+    }
+  }
+
+  return rows.length > 0 ? { inline_keyboard: rows } : undefined;
+}
+
+async function dispatchAdBanner(isTest: boolean = false): Promise<{ success: boolean; message: string }> {
+  try {
+    if (store.isSystemTurnedOff) {
+      return { success: false, message: "سیستم در حالت خاموشی اضطراری است." };
+    }
+    const token = store.settings?.botToken;
+    const dest = store.settings?.destinationChannel;
+    if (!token) {
+      return { success: false, message: "توکن ربات تلگرام تنظیم نشده است." };
+    }
+    if (!dest) {
+      return { success: false, message: "کانال مقصد تنظیم نشده است." };
+    }
+
+    const ad = store.settings?.adBannerSettings || DEFAULT_AD_BANNER_SETTINGS;
+    if (!isTest && !ad.enableAdBanner) {
+      return { success: false, message: "بنر تبلیغاتی غیرفعال است." };
+    }
+
+    const rows: any[][] = [];
+    if (ad.adButtonText && ad.adButtonUrl) {
+      rows.push([{ text: ad.adButtonText.trim(), url: ad.adButtonUrl.trim() }]);
+    }
+    const replyMarkup = rows.length > 0 ? { inline_keyboard: rows } : undefined;
+
+    let res: any;
+    if (ad.adMediaUrl && ad.adMediaUrl.trim()) {
+      const isVideo = ad.adMediaUrl.match(/\.(mp4|mov|avi|mkv)(\?.*)?$/i);
+      const method = isVideo ? "sendVideo" : "sendPhoto";
+      const paramKey = isVideo ? "video" : "photo";
+
+      res = await callTelegramBotApi(token, method, {
+        chat_id: dest,
+        [paramKey]: ad.adMediaUrl.trim(),
+        caption: ad.adText,
+        parse_mode: "HTML",
+        reply_markup: replyMarkup,
+      });
+
+      if (!res.ok) {
+        res = await callTelegramBotApi(token, "sendMessage", {
+          chat_id: dest,
+          text: `${ad.adText}\n\n[رسانه: ${ad.adMediaUrl.trim()}]`,
+          parse_mode: "HTML",
+          reply_markup: replyMarkup,
+        });
+      }
+    } else {
+      res = await callTelegramBotApi(token, "sendMessage", {
+        chat_id: dest,
+        text: ad.adText,
+        parse_mode: "HTML",
+        reply_markup: replyMarkup,
+      });
+    }
+
+    if (res.ok) {
+      if (ad.pinAdMessage && res.result?.message_id) {
+        await callTelegramBotApi(token, "pinChatMessage", {
+          chat_id: dest,
+          message_id: res.result.message_id,
+          disable_notification: true,
+        }).catch((e) => console.warn("[AD BANNER PIN WARNING]", e));
+      }
+
+      ad.totalAdsSent = (ad.totalAdsSent || 0) + 1;
+      ad.lastAdSentAt = new Date().toISOString();
+      ad.postsSinceLastAd = 0;
+      saveStore();
+
+      addLog(
+        "ad_banner",
+        "ad_sponsor",
+        "بنر تبلیغاتی خودکار",
+        res.result?.message_id || 0,
+        "text",
+        "success",
+        isTest ? "بنر تبلیغاتی تستی با موفقیت به کانال مقصد ارسال شد." : "بنر تبلیغاتی زمان‌بندی‌شده به کانال مقصد ارسال شد."
+      );
+
+      return { success: true, message: "بنر تبلیغاتی با موفقیت به کانال مقصد ارسال شد." };
+    } else {
+      const err = humanizeTelegramError(res.description);
+      addLog(
+        "ad_banner",
+        "ad_sponsor",
+        "بنر تبلیغاتی خودکار",
+        0,
+        "text",
+        "error",
+        `خطا در ارسال بنر تبلیغاتی: ${err}`
+      );
+      return { success: false, message: `خطا در ارسال به تلگرام: ${err}` };
+    }
+  } catch (err: any) {
+    console.error("[DISPATCH AD BANNER ERROR]", err);
+    return { success: false, message: `خطای سیستمی در ارسال بنر: ${err.message}` };
   }
 }
 
@@ -1958,6 +2230,8 @@ async function startServer() {
   const app = express();
   app.use(express.json());
 
+  let botPollerBackoffUntil = 0;
+
   // Requirement: Health check routes for Railway / Cloud Run / AI Studio monitoring
   app.get(["/health", "/api/health"], (req, res) => {
     res.status(200).json({ status: "ok" });
@@ -2014,6 +2288,11 @@ async function startServer() {
       if (!store.sources) store.sources = [];
       if (!store.logs) store.logs = [];
       if (!store.stats) store.stats = { totalTransferred: 0, failedMessages: 0, startTime: new Date().toISOString() };
+      if (!store.settings.reactionSettings) store.settings.reactionSettings = { ...DEFAULT_REACTION_SETTINGS };
+      if (!store.settings.interactiveButtonsSettings) store.settings.interactiveButtonsSettings = { ...DEFAULT_INTERACTIVE_BUTTONS_SETTINGS };
+      if (!store.settings.adBannerSettings) store.settings.adBannerSettings = { ...DEFAULT_AD_BANNER_SETTINGS };
+      if (!(store as any).reactionCounts) (store as any).reactionCounts = {};
+      if (!(store as any).reactionVotes) (store as any).reactionVotes = {};
 
       // 3. Environment variables override for credentials
       if (process.env.BOT_TOKEN) {
@@ -2091,6 +2370,7 @@ async function startServer() {
           let sentSuccess = false;
           const mediaMeta = item.mediaMetadata;
           const caption = item.formattedText || item.messageText || "";
+          const postKeyboard = buildPostInlineKeyboard(destination, item.originalMessageId);
 
           if (mediaMeta?.bufferBase64 && item.mediaType && item.mediaType !== "text") {
             const buffer = Buffer.from(mediaMeta.bufferBase64, "base64");
@@ -2112,7 +2392,7 @@ async function startServer() {
               fieldName = "animation";
             }
 
-            const res = await sendBotMedia(botToken, botMethod, destination, buffer, fileName, fieldName, caption);
+            const res = await sendBotMedia(botToken, botMethod, destination, buffer, fileName, fieldName, caption, "HTML", postKeyboard);
             if (res.ok) {
               sentSuccess = true;
             } else {
@@ -2126,11 +2406,13 @@ async function startServer() {
               chat_id: destination,
               text: textPayload,
               parse_mode: "HTML",
+              reply_markup: postKeyboard,
             });
             if (!res.ok) {
               res = await callTelegramBotApi(botToken, "sendMessage", {
                 chat_id: destination,
                 text: textPayload,
+                reply_markup: postKeyboard,
               });
             }
             if (res.ok) {
@@ -2151,6 +2433,20 @@ async function startServer() {
             store.stats = { totalTransferred: 0, failedMessages: 0, startTime: new Date().toISOString() };
           }
           store.stats.totalTransferred = (store.stats.totalTransferred || 0) + 1;
+          defaultSystemHealthService.recordTransferSuccess(1);
+
+          // Check and trigger scheduled ad banner by interval
+          if (store.settings.adBannerSettings?.enableAdBanner) {
+            const ad = store.settings.adBannerSettings;
+            ad.postsSinceLastAd = (ad.postsSinceLastAd || 0) + 1;
+            if (ad.triggerMode === "interval" || ad.triggerMode === "both") {
+              if (ad.postsSinceLastAd >= (ad.postInterval || 10)) {
+                setTimeout(() => {
+                  dispatchAdBanner(false).catch((e) => console.error("[AD BANNER INTERVAL ERROR]", e));
+                }, 3000);
+              }
+            }
+          }
 
           addLog(
             item.sourceChannelId,
@@ -2170,6 +2466,7 @@ async function startServer() {
             store.stats = { totalTransferred: 0, failedMessages: 0, startTime: new Date().toISOString() };
           }
           store.stats.failedMessages = (store.stats.failedMessages || 0) + 1;
+          defaultSystemHealthService.recordTransferError(1);
           addLog(
             item.sourceChannelId,
             item.sourceChannelUsername || "source",
@@ -2183,6 +2480,19 @@ async function startServer() {
           return { success: false, error: errorMsg };
         }
       });
+
+      // Scheduled Ad Banner Hourly Trigger Check (Every 5 minutes)
+      setInterval(() => {
+        const ad = store.settings?.adBannerSettings;
+        if (ad && ad.enableAdBanner && (ad.triggerMode === "hourly" || ad.triggerMode === "both")) {
+          const hours = ad.hourInterval || 6;
+          const lastSent = ad.lastAdSentAt ? new Date(ad.lastAdSentAt).getTime() : 0;
+          const now = Date.now();
+          if (now - lastSent >= hours * 3600 * 1000) {
+            dispatchAdBanner(false).catch((e) => console.error("[AD BANNER HOURLY INTERVAL ERROR]", e));
+          }
+        }
+      }, 5 * 60 * 1000);
 
       // Scheduled Daily Digest & 24-Hour Database Backup at 00:00 Tehran Time
       let lastDailyDigestSentDate = "";
@@ -2414,6 +2724,7 @@ async function startServer() {
     store.settings.destinationChannel = cleanDest;
     store.settings.isVerified = true;
     store.settings.botUsername = botMe.result.username;
+    botPollerBackoffUntil = 0;
 
     if (adminPassword && String(adminPassword).trim()) {
       store.adminPasswordHash = String(adminPassword).trim();
@@ -3108,6 +3419,7 @@ async function startServer() {
 
       store.settings.botToken = cleanToken;
       store.settings.destinationChannel = cleanDest;
+      botPollerBackoffUntil = 0;
       store.settings.botInfo = {
         id: botMe.result.id,
         username: botMe.result.username,
@@ -3677,6 +3989,120 @@ async function startServer() {
     res.status(400).json({ success: false, message: "تنظیمات نامعتبر است." });
   });
 
+  // --- Reaction Counter API Endpoints ---
+  app.get("/api/reactions", (req, res) => {
+    const reactions = store.settings.reactionSettings || DEFAULT_REACTION_SETTINGS;
+    res.json({ success: true, reactions });
+  });
+
+  app.post("/api/reactions", (req, res) => {
+    const config = req.body;
+    if (config && typeof config === "object") {
+      const prev = store.settings.reactionSettings || DEFAULT_REACTION_SETTINGS;
+      store.settings.reactionSettings = {
+        ...DEFAULT_REACTION_SETTINGS,
+        ...prev,
+        ...config,
+      };
+      saveStore();
+      addLog("system", "system", "شمارنده ری‌اکشن", 0, "config", "success", "تنظیمات دکمه‌های ری‌اکشن ایموجی با موفقیت به‌روزرسانی شد.");
+      return res.json({
+        success: true,
+        message: "تنظیمات شمارنده ری‌اکشن‌ها با موفقیت ذخیره گردید.",
+        reactions: store.settings.reactionSettings,
+      });
+    }
+    res.status(400).json({ success: false, message: "داده‌های ورودی نامعتبر است." });
+  });
+
+  // --- Interactive Inline Buttons API Endpoints ---
+  app.get("/api/interactive-buttons", (req, res) => {
+    const buttons = store.settings.interactiveButtonsSettings || DEFAULT_INTERACTIVE_BUTTONS_SETTINGS;
+    res.json({ success: true, buttons });
+  });
+
+  app.post("/api/interactive-buttons", (req, res) => {
+    const config = req.body;
+    if (config && typeof config === "object") {
+      const prev = store.settings.interactiveButtonsSettings || DEFAULT_INTERACTIVE_BUTTONS_SETTINGS;
+      store.settings.interactiveButtonsSettings = {
+        ...DEFAULT_INTERACTIVE_BUTTONS_SETTINGS,
+        ...prev,
+        ...config,
+      };
+      saveStore();
+      addLog("system", "system", "دکمه‌های شیشه‌ای تعاملی", 0, "config", "success", "تنظیمات دکمه‌های شیشه‌ای تعاملی با موفقیت ذخیره شد.");
+      return res.json({
+        success: true,
+        message: "تنظیمات دکمه‌های تعاملی با موفقیت ذخیره گردید.",
+        buttons: store.settings.interactiveButtonsSettings,
+      });
+    }
+    res.status(400).json({ success: false, message: "داده‌های ورودی نامعتبر است." });
+  });
+
+  // --- Scheduled Ad Banner API Endpoints ---
+  app.get("/api/ad-banner", (req, res) => {
+    const adBanner = store.settings.adBannerSettings || DEFAULT_AD_BANNER_SETTINGS;
+    res.json({ success: true, adBanner });
+  });
+
+  app.post("/api/ad-banner", (req, res) => {
+    const config = req.body;
+    if (config && typeof config === "object") {
+      const prev = store.settings.adBannerSettings || DEFAULT_AD_BANNER_SETTINGS;
+      store.settings.adBannerSettings = {
+        ...DEFAULT_AD_BANNER_SETTINGS,
+        ...prev,
+        ...config,
+      };
+      saveStore();
+      addLog("system", "system", "بنر تبلیغاتی زمان‌بندی", 0, "config", "success", "تنظیمات بنر تبلیغاتی خودکار ذخیره شد.");
+      return res.json({
+        success: true,
+        message: "تنظیمات بنر تبلیغاتی زمان‌بندی‌شده با موفقیت ذخیره گردید.",
+        adBanner: store.settings.adBannerSettings,
+      });
+    }
+    res.status(400).json({ success: false, message: "داده‌های ورودی نامعتبر است." });
+  });
+
+  app.post("/api/ad-banner/send-now", async (req, res) => {
+    const result = await dispatchAdBanner(true);
+    if (result.success) {
+      res.json(result);
+    } else {
+      res.status(400).json(result);
+    }
+  });
+
+  app.post("/api/engagement/test-post", async (req, res) => {
+    try {
+      const token = store.settings?.botToken;
+      const dest = store.settings?.destinationChannel;
+      if (!token || !dest) {
+        return res.status(400).json({ success: false, message: "ربات یا کانال مقصد تنظیم نشده است." });
+      }
+      const sampleText = (req.body?.text && req.body.text.trim()) || "✨ <b>پست آزمایشی دکمه‌های تعاملی و ری‌اکشن</b>\n\nاین یک پیام نمونه است تا عملکرد دکمه‌های شیشه‌ای، لینک‌ها و شمارنده ری‌اکشن‌ها را در کانال مقصد بررسی کنید.";
+      const postMarkup = buildPostInlineKeyboard(dest, Date.now() % 100000);
+      const tgRes = await callTelegramBotApi(token, "sendMessage", {
+        chat_id: dest,
+        text: sampleText,
+        parse_mode: "HTML",
+        reply_markup: postMarkup,
+      });
+      if (tgRes.ok) {
+        addLog("system", "system", "تست تعاملی", tgRes.result?.message_id || 0, "text", "success", "پست تستی با دکمه‌های تعاملی و ری‌اکشن به کانال مقصد ارسال شد.");
+        saveStore();
+        return res.json({ success: true, message: "پست نمونه با موفقیت به کانال مقصد ارسال شد!" });
+      } else {
+        return res.status(400).json({ success: false, message: humanizeTelegramError(tgRes.description) });
+      }
+    } catch (err: any) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
   // --- Queue Management Endpoints ---
   app.get("/api/queue", async (req, res) => {
     const status = (req.query.status as string) || "all";
@@ -4103,6 +4529,36 @@ async function startServer() {
     const errorCount = store.logs.filter((l) => l.status === "error").length;
     const totalFilteredOrUnsent = filteredCount + errorCount;
 
+    // Calculate 24-hour activity distribution (8 buckets of 3 hours)
+    const nowTime = Date.now();
+    const ONE_HOUR = 60 * 60 * 1000;
+    const hourlyMap = new Map<string, { count: number; failedCount: number }>();
+    for (let i = 7; i >= 0; i--) {
+      const d = new Date(nowTime - i * 3 * ONE_HOUR);
+      const hourLabel = `${String(d.getHours()).padStart(2, "0")}:00`;
+      hourlyMap.set(hourLabel, { count: 0, failedCount: 0 });
+    }
+    (store.logs || []).forEach((l) => {
+      const logTime = new Date(l.timestamp).getTime();
+      if (nowTime - logTime <= 24 * ONE_HOUR) {
+        const h = new Date(logTime).getHours();
+        const bucketHour = Math.floor(h / 3) * 3;
+        const key = `${String(bucketHour).padStart(2, "0")}:00`;
+        const cur = hourlyMap.get(key) || { count: 0, failedCount: 0 };
+        if (l.status === "success") {
+          cur.count += 1;
+        } else if (l.status === "error") {
+          cur.failedCount += 1;
+        }
+        hourlyMap.set(key, cur);
+      }
+    });
+    const hourlyActivity: HourlyActivityPoint[] = Array.from(hourlyMap.entries()).map(([hour, val]) => ({
+      hour,
+      count: val.count,
+      failedCount: val.failedCount,
+    }));
+
     const stats: SystemStats = {
       totalSources: store.sources.length,
       activeSources: activeCount,
@@ -4111,6 +4567,11 @@ async function startServer() {
       filteredMessages: totalFilteredOrUnsent,
       unsentMessages: totalFilteredOrUnsent,
       failedMessages: store.stats.failedMessages || errorCount,
+      totalReactionsCount: store.settings.reactionSettings?.totalReactionsCount || 0,
+      totalAdsSent: store.settings.adBannerSettings?.totalAdsSent || 0,
+      postsSinceLastAd: store.settings.adBannerSettings?.postsSinceLastAd || 0,
+      hourlyActivity,
+      healthMetrics: defaultSystemHealthService.getHealthMetrics(),
       lastForwardTime: store.logs.find((l) => l.status === "success")?.timestamp,
       isPollingActive: true,
       botStatus: isBotConnected ? "connected" : "not_configured",
@@ -4135,6 +4596,11 @@ async function startServer() {
     };
 
     res.json({ stats });
+  });
+
+  // Dedicated real-time System Health Telemetry endpoint (polled for live D3 charts)
+  app.get("/api/system/health", (req, res) => {
+    res.json(defaultSystemHealthService.getHealthMetrics());
   });
 
   // BACKUP & DATABASE MANAGEMENT ENDPOINTS
@@ -4927,6 +5393,7 @@ async function startServer() {
 
   async function pollTelegramBotUpdates() {
     if (isBotPollerRunning) return;
+    if (Date.now() < botPollerBackoffUntil) return;
     const token = store.settings?.botToken;
     if (!token || !token.trim()) return;
 
@@ -4944,23 +5411,37 @@ async function startServer() {
             offset: -1,
             limit: 1,
             timeout: 0,
-          });
+          }, 8000);
           if (initCheck.ok && Array.isArray(initCheck.result) && initCheck.result.length > 0) {
             botPollerOffset = initCheck.result[0].update_id + 1;
             (store as any).botPollerOffset = botPollerOffset;
             saveStore();
             console.log(`[BOT POLLER] Fast-forwarded offset to ${botPollerOffset} to clear historical backlog`);
+          } else if (initCheck.error_code === 401) {
+            botPollerBackoffUntil = Date.now() + 60000;
+            return;
           }
         } catch (_) {}
       }
 
       const updatesRes = await callTelegramBotApi(token, "getUpdates", {
         offset: botPollerOffset,
-        timeout: 10,
+        timeout: 0, // Using 0 for instant non-blocking polling avoids long-lived open sockets
         allowed_updates: ["message", "callback_query"],
-      });
+      }, 10000);
 
-      if (updatesRes.ok && Array.isArray(updatesRes.result)) {
+      if (!updatesRes.ok) {
+        if (updatesRes.error_code === 401) {
+          // Token is invalid/revoked; back off for 60 seconds to prevent hammering
+          botPollerBackoffUntil = Date.now() + 60000;
+        } else if (updatesRes.error_code === 500) {
+          // Transient network error (fetch failed / timeout); brief backoff
+          botPollerBackoffUntil = Date.now() + 6000;
+        }
+        return;
+      }
+
+      if (Array.isArray(updatesRes.result)) {
         for (const update of updatesRes.result) {
           botPollerOffset = Math.max(botPollerOffset, update.update_id + 1);
           (store as any).botPollerOffset = botPollerOffset;
@@ -5007,6 +5488,67 @@ async function startServer() {
             const data = cq.data;
             const msgId = cq.message?.message_id;
             const chatId = cq.message?.chat?.id;
+
+            // Check for Public Reaction Clicks (accessible to all channel/group readers)
+            if (data && data.startsWith("rx_")) {
+              const parts = data.split("_");
+              const emojiIdx = parseInt(parts[1], 10);
+              const origMsgId = parts[2] ? parseInt(parts[2], 10) : msgId;
+              const rxConfig = store.settings?.reactionSettings || DEFAULT_REACTION_SETTINGS;
+              const emojiList = rxConfig.emojis || ["👍", "❤️", "🔥", "👏"];
+              const selectedEmoji = emojiList[emojiIdx] || "👍";
+
+              const rxKey = `${chatId}_${origMsgId}`;
+              if (!(store as any).reactionCounts) (store as any).reactionCounts = {};
+              if (!(store as any).reactionVotes) (store as any).reactionVotes = {};
+              if (!(store as any).reactionCounts[rxKey]) (store as any).reactionCounts[rxKey] = {};
+              if (!(store as any).reactionVotes[rxKey]) (store as any).reactionVotes[rxKey] = {};
+
+              const postVotes = (store as any).reactionVotes[rxKey];
+              const postCounts = (store as any).reactionCounts[rxKey];
+              const previousVote = postVotes[fromId];
+
+              let feedback = "";
+              if (previousVote === selectedEmoji) {
+                // Remove vote (toggle off)
+                postCounts[selectedEmoji] = Math.max(0, (postCounts[selectedEmoji] || 1) - 1);
+                delete postVotes[fromId];
+                feedback = `رأی شما برای ${selectedEmoji} برداشته شد.`;
+              } else {
+                if (previousVote && !rxConfig.allowMultiple) {
+                  // Decrement previous emoji
+                  postCounts[previousVote] = Math.max(0, (postCounts[previousVote] || 1) - 1);
+                }
+                postCounts[selectedEmoji] = (postCounts[selectedEmoji] || 0) + 1;
+                postVotes[fromId] = selectedEmoji;
+                feedback = `رأی شما با ${selectedEmoji} ثبت شد!`;
+                if (rxConfig) {
+                  rxConfig.totalReactionsCount = (rxConfig.totalReactionsCount || 0) + 1;
+                }
+              }
+
+              // Update the message reply markup on Telegram with fresh reaction numbers
+              const updatedMarkup = buildPostInlineKeyboard(String(chatId), origMsgId);
+              if (chatId && msgId && updatedMarkup) {
+                callTelegramBotApi(token, "editMessageReplyMarkup", {
+                  chat_id: chatId,
+                  message_id: msgId,
+                  reply_markup: updatedMarkup,
+                }).catch((err) => {
+                  console.warn("[REACTION EDIT WARNING]", err?.message || err);
+                });
+              }
+
+              // Answer callback query with immediate toast notification to the user
+              await callTelegramBotApi(token, "answerCallbackQuery", {
+                callback_query_id: cq.id,
+                text: feedback,
+                show_alert: false,
+              }).catch(() => {});
+
+              saveStore();
+              continue;
+            }
 
             if (!isTelegramUserAdmin(fromId, fromUsername)) {
               await callTelegramBotApi(token, "answerCallbackQuery", {

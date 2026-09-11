@@ -2,8 +2,10 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { BotSettings, SourceChannel, ActivityLog, SystemStats } from './types';
 import { getSettings, getSources, getLogs, getStats } from './lib/telegramApi';
 import { Navbar, AppTheme } from './components/Navbar';
-import { TaskbarNav } from './components/TaskbarNav';
+import { SidebarNav } from './components/SidebarNav';
 import { StatsOverview } from './components/StatsOverview';
+import { EngagementCenterCard } from './components/EngagementCenterCard';
+import { AdBannerCard } from './components/AdBannerCard';
 import { QueueManagementCard } from './components/QueueManagementCard';
 import { AdminReportGroupCard } from './components/AdminReportGroupCard';
 import { TelegramClientCard } from './components/TelegramClientCard';
@@ -18,12 +20,13 @@ import { AdminLoginModal } from './components/AdminLoginModal';
 import { DatabaseManagementCard } from './components/DatabaseManagementCard';
 import { InBotManagementCard } from './components/InBotManagementCard';
 import { SetupWizardModal } from './components/SetupWizardModal';
-import { Lock, KeyRound } from 'lucide-react';
+import { Lock, KeyRound, Menu } from 'lucide-react';
 
 export default function App() {
   const [isAdmin, setIsAdmin] = useState<boolean>(() => {
     return sessionStorage.getItem('is_admin') === 'true';
   });
+  const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(false);
   const [isLoginModalOpen, setIsLoginModalOpen] = useState<boolean>(false);
   const [isSetupWizardOpen, setIsSetupWizardOpen] = useState<boolean>(false);
   const [loginModalMode, setLoginModalMode] = useState<'login' | 'change_password'>('login');
@@ -172,25 +175,79 @@ export default function App() {
         onLogout={handleLogout}
         onRefresh={fetchData}
         isRefreshing={isRefreshing}
+        onToggleSidebar={() => setIsSidebarOpen((prev) => !prev)}
       />
 
-      {/* Taskbar Navigation for quick access & responsive mobile tabs */}
-      <TaskbarNav
+      {/* Professional Vertical Slide-Out Navigation Drawer with Backdrop Blur */}
+      <SidebarNav
+        isOpen={isSidebarOpen}
+        onClose={() => setIsSidebarOpen(false)}
         activeTab={activeTab}
         setActiveTab={setActiveTab}
         viewMode={viewMode}
         setViewMode={setViewMode}
         isAdmin={isAdmin}
         onRequireLogin={handleOpenLogin}
+        stats={stats}
       />
 
-      {/* Main Body */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 lg:px-8 py-6 pb-28 space-y-6 overflow-x-hidden">
+      {/* Floating Vertical Sidebar Launcher Button on Side */}
+      <button
+        onClick={() => setIsSidebarOpen(true)}
+        className={`fixed bottom-6 right-4 sm:right-6 z-40 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white px-3.5 py-2.5 rounded-2xl shadow-xl shadow-blue-500/25 border border-white/20 transition-all duration-300 flex items-center gap-2 text-xs font-bold active:scale-95 cursor-pointer ${
+          isSidebarOpen ? 'opacity-0 pointer-events-none translate-x-8' : 'opacity-100 translate-x-0'
+        }`}
+        title="باز کردن سایدبار عمودی ناوبری"
+        id="floating-sidebar-launcher-btn"
+      >
+        <Menu className="w-4 h-4" />
+        <span className="hidden sm:inline">سایدبار منو</span>
+        <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+      </button>
+
+      {/* Main Body - Blurs smoothly when sidebar is open */}
+      <main
+        className={`flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 lg:px-8 py-6 pb-28 space-y-6 overflow-x-hidden transition-all duration-300 ease-out ${
+          isSidebarOpen ? 'filter blur-[3px] opacity-60 pointer-events-none select-none' : ''
+        }`}
+      >
         
         {/* System Stats Overview */}
         {shouldShow('stats-overview') && (
           <div id="stats-overview">
-            <StatsOverview stats={stats} />
+            <StatsOverview
+              stats={stats}
+              onNavigateToEngagement={() => {
+                setActiveTab('engagement-center-card');
+                const el = document.getElementById('engagement-center-card');
+                el?.scrollIntoView({ behavior: 'smooth' });
+              }}
+              onNavigateToAdBanner={() => {
+                setActiveTab('ad-banner-card');
+                const el = document.getElementById('ad-banner-card');
+                el?.scrollIntoView({ behavior: 'smooth' });
+              }}
+            />
+          </div>
+        )}
+
+        {/* Engagement Center (Reactions & Glass Inline Buttons) */}
+        {shouldShow('engagement-center-card') && (
+          <div id="engagement-center-card">
+            <EngagementCenterCard
+              destinationChannel={settings.destinationChannel}
+              onRefresh={fetchData}
+            />
+          </div>
+        )}
+
+        {/* Scheduled Ad Banner */}
+        {shouldShow('ad-banner-card') && (
+          <div id="ad-banner-card">
+            <AdBannerCard
+              destinationChannel={settings.destinationChannel}
+              onRefresh={fetchData}
+            />
           </div>
         )}
 
@@ -315,8 +372,12 @@ export default function App() {
 
       </main>
 
-      {/* Footer */}
-      <footer className="border-t border-slate-200/80 bg-white py-6 text-center text-xs text-slate-500 shadow-sm">
+      {/* Footer - Blurs smoothly when sidebar is open */}
+      <footer
+        className={`border-t border-slate-200/80 bg-white py-6 text-center text-xs text-slate-500 shadow-sm transition-all duration-300 ease-out ${
+          isSidebarOpen ? 'filter blur-[3px] opacity-60 pointer-events-none select-none' : ''
+        }`}
+      >
         <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-4">
           <p>سامانه مانیتورینگ و فروارد هوشمند تلگرام (GramJS) - مدیریت و پشتیبان‌گیری داده‌ها</p>
           <div className="flex items-center space-x-4 space-x-reverse text-slate-500">

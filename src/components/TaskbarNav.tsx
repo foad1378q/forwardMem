@@ -13,6 +13,8 @@ import {
   MessageSquareCode,
   Clock,
   ShieldAlert,
+  Sparkles,
+  Megaphone,
 } from 'lucide-react';
 
 export interface NavSection {
@@ -26,6 +28,8 @@ export interface NavSection {
 
 export const NAV_SECTIONS: NavSection[] = [
   { id: 'stats-overview', label: 'داشبورد مانیتورینگ', shortLabel: 'داشبورد', icon: BarChart3 },
+  { id: 'engagement-center-card', label: 'ری‌اکشن و دکمه شیشه‌ای', shortLabel: 'تعامل و دکمه', icon: Sparkles },
+  { id: 'ad-banner-card', label: 'بنر تبلیغاتی زمان‌بندی', shortLabel: 'تبلیغات', icon: Megaphone },
   { id: 'queue-management-card', label: 'صف و ارسال هوشمند', shortLabel: 'صف ارسال', icon: Clock },
   { id: 'report-group-card', label: 'کانال گزارش و هشدار', shortLabel: 'کانال گزارش', icon: ShieldAlert },
   { id: 'telegram-client-card', label: 'حساب تلگرام', shortLabel: 'اکانت', icon: Smartphone },

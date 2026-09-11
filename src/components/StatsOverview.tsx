@@ -1,5 +1,6 @@
 import React from 'react';
 import { SystemStats } from '../types';
+import { SystemHealthDashboard } from './SystemHealthDashboard';
 import {
   Radio,
   Zap,
@@ -11,13 +12,24 @@ import {
   Layers,
   AlertTriangle,
   BellRing,
+  Heart,
+  Megaphone,
+  Sparkles,
+  TrendingUp,
+  Activity,
 } from 'lucide-react';
 
 interface StatsOverviewProps {
   stats: SystemStats;
+  onNavigateToEngagement?: () => void;
+  onNavigateToAdBanner?: () => void;
 }
 
-export const StatsOverview: React.FC<StatsOverviewProps> = ({ stats }) => {
+export const StatsOverview: React.FC<StatsOverviewProps> = ({
+  stats,
+  onNavigateToEngagement,
+  onNavigateToAdBanner,
+}) => {
   const formatUptime = (sec: number) => {
     const days = Math.floor(sec / 86400);
     const hours = Math.floor((sec % 86400) / 3600);
@@ -29,6 +41,8 @@ export const StatsOverview: React.FC<StatsOverviewProps> = ({ stats }) => {
 
   const filteredCount = stats.filteredMessages ?? stats.unsentMessages ?? 0;
   const queueStats = stats.queueStats;
+  const hourlyData = stats.hourlyActivity || [];
+  const maxHourlyCount = Math.max(1, ...hourlyData.map((d) => d.count + (d.failedCount || 0)));
 
   return (
     <div className="space-y-4">
@@ -48,7 +62,7 @@ export const StatsOverview: React.FC<StatsOverviewProps> = ({ stats }) => {
         </div>
       )}
 
-      {/* Main 5-Card Metric Overview */}
+      {/* Main Metric Cards Grid (5 Core Metrics) */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
         {/* Monitored Channels Card */}
         <div className="bg-white rounded-3xl border border-slate-200/80 p-5 shadow-xs flex items-center justify-between transition hover:border-slate-300">
@@ -130,6 +144,133 @@ export const StatsOverview: React.FC<StatsOverviewProps> = ({ stats }) => {
           </div>
         </div>
       </div>
+
+      {/* Secondary Row: Engagement & Ad Monetization KPIs */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {/* Reaction Counter KPI Card */}
+        <div
+          onClick={onNavigateToEngagement}
+          className="bg-white rounded-3xl border border-slate-200/80 p-5 shadow-xs flex items-center justify-between transition hover:border-rose-300 hover:shadow-sm cursor-pointer group"
+        >
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="text-2xs font-bold text-slate-400">واکنش‌ها و ری‌اکشن‌ها (Reactions)</span>
+              <span className="px-2 py-0.2 rounded-full bg-rose-50 text-rose-600 text-3xs font-black">
+                شمارنده هوشمند
+              </span>
+            </div>
+            <div className="flex items-baseline space-x-2 space-x-reverse">
+              <span className="text-2xl font-black text-rose-600">
+                {(stats.totalReactionsCount || 0).toLocaleString('fa-IR')}
+              </span>
+              <span className="text-2xs text-slate-500 font-medium">واکنش ثبت شده</span>
+            </div>
+            <p className="text-3xs text-slate-400">
+              دکمه‌های تعاملی شیشه‌ای و شمارش لحظه‌ای واکنش مخاطبان به پست‌های فوروارد شده
+            </p>
+          </div>
+          <div className="w-12 h-12 rounded-2xl bg-rose-50 border border-rose-100 flex items-center justify-center text-rose-600 group-hover:scale-110 transition">
+            <Heart className="w-6 h-6 text-rose-500" />
+          </div>
+        </div>
+
+        {/* Ad Banner KPI Card */}
+        <div
+          onClick={onNavigateToAdBanner}
+          className="bg-white rounded-3xl border border-slate-200/80 p-5 shadow-xs flex items-center justify-between transition hover:border-amber-300 hover:shadow-sm cursor-pointer group"
+        >
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="text-2xs font-bold text-slate-400">تبلیغات زمان‌بندی و اسپانسر</span>
+              <span className="px-2 py-0.2 rounded-full bg-amber-50 text-amber-700 text-3xs font-black">
+                Ad Banner
+              </span>
+            </div>
+            <div className="flex items-baseline space-x-2 space-x-reverse">
+              <span className="text-2xl font-black text-amber-600">
+                {(stats.totalAdsSent || 0).toLocaleString('fa-IR')}
+              </span>
+              <span className="text-2xs text-slate-500 font-medium">
+                بنر منتشر شده ({stats.postsSinceLastAd || 0} پست از آخرین تبلیغ)
+              </span>
+            </div>
+            <p className="text-3xs text-slate-400">
+              انتشار خودکار بنرهای تبلیغاتی و اسپانسر براساس تعداد پست و بازه ساعتی
+            </p>
+          </div>
+          <div className="w-12 h-12 rounded-2xl bg-amber-50 border border-amber-100 flex items-center justify-center text-amber-600 group-hover:scale-110 transition">
+            <Megaphone className="w-6 h-6 text-amber-600" />
+          </div>
+        </div>
+      </div>
+
+      {/* Real-time D3.js System Health & Node Telemetry Dashboard */}
+      <SystemHealthDashboard initialMetrics={stats.healthMetrics} />
+
+      {/* 24-Hour Activity Distribution Chart */}
+      {hourlyData.length > 0 && (
+        <div className="bg-white rounded-3xl border border-slate-200/80 p-5 shadow-xs space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Activity className="w-4 h-4 text-indigo-600" />
+              <span className="text-xs font-bold text-slate-800">
+                توزیع حجم ارسال پیام‌ها در ۲۴ ساعت گذشته
+              </span>
+            </div>
+            <span className="text-3xs text-slate-400">
+              بازه ۳ ساعته • میانگین حجم ترافیک
+            </span>
+          </div>
+
+          <div className="h-28 flex items-end justify-between gap-2 pt-4 px-2 border-b border-slate-100 pb-2">
+            {hourlyData.map((pt, idx) => {
+              const total = pt.count + (pt.failedCount || 0);
+              const heightPercent = Math.max(8, Math.round((total / maxHourlyCount) * 100));
+              const successHeight = total > 0 ? Math.round((pt.count / total) * 100) : 100;
+
+              return (
+                <div key={idx} className="flex-1 flex flex-col items-center gap-1 group relative">
+                  {/* Tooltip on hover */}
+                  <div className="absolute -top-10 bg-slate-900 text-white px-2 py-1 rounded-lg text-3xs font-mono opacity-0 group-hover:opacity-100 transition pointer-events-none whitespace-nowrap z-10 shadow-md">
+                    ساعت {pt.hour}: {pt.count} ارسال موفق {pt.failedCount ? `(${pt.failedCount} خطا)` : ''}
+                  </div>
+
+                  {/* Stacked Bar */}
+                  <div
+                    className="w-full max-w-[28px] rounded-t-lg bg-emerald-500 transition-all group-hover:brightness-110"
+                    style={{ height: `${heightPercent}%` }}
+                  >
+                    {pt.failedCount > 0 && (
+                      <div
+                        className="w-full bg-rose-500 rounded-t-lg"
+                        style={{ height: `${100 - successHeight}%` }}
+                      />
+                    )}
+                  </div>
+
+                  <span className="text-3xs font-mono text-slate-400 group-hover:text-slate-800 transition">
+                    {pt.hour}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="flex items-center justify-between text-3xs text-slate-500 pt-1">
+            <div className="flex items-center gap-3">
+              <div className="flex items-center gap-1">
+                <span className="w-2.5 h-2.5 rounded-sm bg-emerald-500" />
+                <span>ارسال موفق</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <span className="w-2.5 h-2.5 rounded-sm bg-rose-500" />
+                <span>خطا یا مسدود</span>
+              </div>
+            </div>
+            <span className="font-mono">پیک ترافیک: {maxHourlyCount} پیام</span>
+          </div>
+        </div>
+      )}
 
       {/* System Infrastructure Health Strip */}
       <div className="bg-slate-900 text-white rounded-2xl px-5 py-3.5 flex flex-wrap items-center justify-between gap-3 text-xs">

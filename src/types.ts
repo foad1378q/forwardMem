@@ -134,6 +134,51 @@ export interface BotAdminConfig {
   isBotPollingActive?: boolean;
 }
 
+export interface ReactionSettings {
+  enableReactions: boolean; // default: true
+  emojis: string[]; // e.g. ["👍", "❤️", "🔥", "👏"]
+  allowMultiple?: boolean;
+  totalReactionsCount?: number;
+}
+
+export interface InlineButtonConfig {
+  id: string;
+  text: string;
+  url: string;
+  row?: number; // Row index (1, 2, 3)
+}
+
+export interface InteractiveButtonsSettings {
+  enableButtons: boolean; // Master toggle
+  enableChannelJoinButton: boolean; // "📢 عضویت در کانال"
+  channelJoinText?: string;
+  channelJoinUrl?: string; // If blank, uses destinationChannel
+  enableShareButton: boolean; // "🔄 بازنشر پست"
+  shareText?: string;
+  customButtons: InlineButtonConfig[];
+}
+
+export interface AdBannerSettings {
+  enableAdBanner: boolean;
+  triggerMode: 'interval' | 'hourly' | 'both'; // interval or hourly
+  postInterval: number; // e.g. every 10 posts
+  hourInterval: number; // e.g. every 6 hours
+  adText: string;
+  adMediaUrl?: string;
+  adButtonText?: string;
+  adButtonUrl?: string;
+  pinAdMessage?: boolean;
+  postsSinceLastAd: number;
+  totalAdsSent: number;
+  lastAdSentAt?: string;
+}
+
+export interface HourlyActivityPoint {
+  hour: string; // e.g. "00:00", "03:00", etc.
+  count: number;
+  failedCount?: number;
+}
+
 export interface BotSettings {
   botToken: string;
   destinationChannel: string; // e.g. @my_dest_channel or -100123456789
@@ -161,6 +206,12 @@ export interface BotSettings {
   queueSettings?: QueueSettings;
   // Dedicated Admin Report Group
   reportGroupConfig?: ReportGroupConfig;
+  // Interactive Reaction Counters
+  reactionSettings?: ReactionSettings;
+  // Custom Interactive Inline Buttons
+  interactiveButtonsSettings?: InteractiveButtonsSettings;
+  // Scheduled & Interval Sponsored Ad Banner
+  adBannerSettings?: AdBannerSettings;
 }
 
 export interface SourceChannel {
@@ -261,4 +312,38 @@ export interface SystemStats {
   dbStatus?: 'connected' | 'local_fallback' | 'error';
   lastReceivedTime?: string;
   currentSendingRate?: number;
+  totalReactionsCount?: number;
+  totalAdsSent?: number;
+  postsSinceLastAd?: number;
+  hourlyActivity?: HourlyActivityPoint[];
+  healthMetrics?: SystemHealthMetrics;
+}
+
+export interface SystemHealthPoint {
+  timestamp: string;
+  timeLabel: string;
+  cpuPercent: number;
+  ramUsageMb: number;
+  ramPercent: number;
+  successRate: number;
+  errorFrequency: number;
+  messagesTransferred: number;
+  latencyMs: number;
+}
+
+export interface SystemHealthMetrics {
+  current: SystemHealthPoint;
+  history: SystemHealthPoint[];
+  summary: {
+    avgSuccessRate: number;
+    totalErrorsWindow: number;
+    avgCpuPercent: number;
+    peakRamMb: number;
+    uptimeSeconds: number;
+    nodeVersion: string;
+    platform: string;
+    totalMemoryMb: number;
+    freeMemoryMb: number;
+    status: 'optimal' | 'warning' | 'critical';
+  };
 }

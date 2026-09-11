@@ -1,4 +1,4 @@
-import { BotSettings, SourceChannel, ActivityLog, SystemStats, TelegramPost, TelegramClientConfig } from "../types";
+import { BotSettings, SourceChannel, ActivityLog, SystemStats, TelegramPost, TelegramClientConfig, SystemHealthMetrics } from "../types";
 
 async function safeFetchJson<T>(url: string, options?: RequestInit, fallback?: Partial<T>): Promise<T> {
   try {
@@ -419,6 +419,69 @@ export async function sendBackupToReportChannel(chatId?: string): Promise<{ succ
     body: JSON.stringify({ chatId }),
   }, { success: false, message: "" });
 }
+
+// --- Reactions & Engagement APIs ---
+export async function getReactionSettings(): Promise<{ success: boolean; reactions: any }> {
+  return safeFetchJson("/api/reactions", undefined, { success: false, reactions: null });
+}
+
+export async function saveReactionSettings(config: any): Promise<{ success: boolean; message: string; reactions: any }> {
+  return safeFetchJson("/api/reactions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  }, { success: false, message: "", reactions: null });
+}
+
+// --- Interactive Inline Buttons APIs ---
+export async function getInteractiveButtonsSettings(): Promise<{ success: boolean; buttons: any }> {
+  return safeFetchJson("/api/interactive-buttons", undefined, { success: false, buttons: null });
+}
+
+export async function saveInteractiveButtonsSettings(config: any): Promise<{ success: boolean; message: string; buttons: any }> {
+  return safeFetchJson("/api/interactive-buttons", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  }, { success: false, message: "", buttons: null });
+}
+
+// --- Scheduled & Interval Ad Banner APIs ---
+export async function getAdBannerSettings(): Promise<{ success: boolean; adBanner: any }> {
+  return safeFetchJson("/api/ad-banner", undefined, { success: false, adBanner: null });
+}
+
+export async function saveAdBannerSettings(config: any): Promise<{ success: boolean; message: string; adBanner: any }> {
+  return safeFetchJson("/api/ad-banner", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  }, { success: false, message: "", adBanner: null });
+}
+
+export async function sendAdBannerNow(): Promise<{ success: boolean; message: string }> {
+  return safeFetchJson("/api/ad-banner/send-now", { method: "POST" }, { success: false, message: "" });
+}
+
+export async function testPostEngagement(text?: string): Promise<{ success: boolean; message: string }> {
+  return safeFetchJson("/api/engagement/test-post", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  }, { success: false, message: "" });
+}
+
+export async function getSystemHealthMetrics(): Promise<SystemHealthMetrics | null> {
+  try {
+    const res = await fetch("/api/system/health");
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (e) {
+    console.warn("[API] getSystemHealthMetrics error:", e);
+    return null;
+  }
+}
+
 
 
 

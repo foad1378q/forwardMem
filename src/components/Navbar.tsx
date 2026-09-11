@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { BotSettings, SystemStats } from '../types';
-import { Lock, Unlock, RefreshCw, Send, KeyRound, Palette, Moon, Sun, Layers, LogOut, Sparkles } from 'lucide-react';
+import { Lock, Unlock, RefreshCw, Send, KeyRound, Palette, Moon, Sun, Layers, LogOut, Sparkles, Menu } from 'lucide-react';
 
 export type AppTheme = 'light' | 'dark' | 'neumorphic';
 
@@ -16,6 +16,7 @@ interface NavbarProps {
   onLogout?: () => void;
   onRefresh: () => void;
   isRefreshing: boolean;
+  onToggleSidebar?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -28,6 +29,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onLogout,
   onRefresh,
   isRefreshing,
+  onToggleSidebar,
 }) => {
   const [isThemeMenuOpen, setIsThemeMenuOpen] = useState(false);
 
@@ -47,8 +49,20 @@ export const Navbar: React.FC<NavbarProps> = ({
     }`}>
       <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-2">
         
-        {/* Brand */}
+        {/* Brand & Sidebar Toggle */}
         <div className="flex items-center space-x-2.5 space-x-reverse min-w-0">
+          {onToggleSidebar && (
+            <button
+              onClick={onToggleSidebar}
+              className="p-2 sm:px-2.5 sm:py-2 bg-blue-50 dark:bg-slate-800 hover:bg-blue-100 dark:hover:bg-slate-700 text-blue-700 dark:text-blue-300 rounded-xl transition flex items-center space-x-1.5 space-x-reverse text-xs font-bold shrink-0 active:scale-95 border border-blue-200/70 dark:border-slate-700 cursor-pointer shadow-xs"
+              title="سایدبار عمودی ناوبری کشویی"
+              id="sidebar-toggle-navbar-btn"
+            >
+              <Menu className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
+              <span className="hidden md:inline-block">سایدبار منو</span>
+            </button>
+          )}
+
           <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-600 flex items-center justify-center text-white shadow-md shadow-blue-500/20 shrink-0">
             <Send className="w-4 h-4 sm:w-5 sm:h-5" />
           </div>
