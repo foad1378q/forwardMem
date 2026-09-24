@@ -1378,6 +1378,32 @@ export async function clearLogsInDb(): Promise<void> {
 }
 
 /**
+ * Clean up logs older than specified hours (default 24 hours).
+ */
+export async function cleanLogsOlderThanHoursInDb(hours: number = 24): Promise<number> {
+  if (!pool || !isDbConnected) return 0;
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+    const result = await client.query('DELETE FROM logs WHERE timestamp < $1', [cutoff]);
+    await client.query('COMMIT');
+    const count = result.rowCount || 0;
+    if (count > 0) {
+      console.log(`[DATABASE] Cleaned up ${count} logs older than ${hours} hours from PostgreSQL.`);
+    }
+    return count;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[DATABASE ERROR] Error cleaning old logs:', err);
+    return 0;
+  } finally {
+    client.release();
+  }
+}
+
+/**
  * Requirement 3, 9, 13: Update statistics table in PostgreSQL.
  */
 export async function updateStatsInDb(stats: any): Promise<void> {

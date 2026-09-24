@@ -60,7 +60,6 @@ import {
   TelegramMediaItem,
   TelegramClientConfig,
   AiProcessingConfig,
-  ReactionSettings,
   InteractiveButtonsSettings,
   AdBannerSettings,
   HourlyActivityPoint,
@@ -79,6 +78,7 @@ import {
   deleteSourceFromDb,
   addLogToDb,
   clearLogsInDb,
+  cleanLogsOlderThanHoursInDb,
   updateStatsInDb,
   getDatabaseHealth,
   exportDatabaseData,
@@ -429,12 +429,6 @@ let store: DataStore = {
     enableGlobalKeywords: false,
     globalKeywordMatchMode: "any",
     aiProcessing: DEFAULT_AI_PROCESSING,
-    reactionSettings: {
-      enableReactions: true,
-      emojis: ["👍", "❤️", "🔥", "👏"],
-      allowMultiple: false,
-      totalReactionsCount: 0,
-    },
     interactiveButtonsSettings: {
       enableButtons: true,
       enableChannelJoinButton: true,
@@ -544,6 +538,32 @@ function addLog(
   addLogToDb(log).catch((e) => console.error("Error writing log to DB:", e));
   saveStore();
   return log;
+}
+
+/**
+ * Requirement: Automatically purges all logs older than 24 hours from in-memory store and database.
+ */
+export function cleanupLogsOlderThan24Hours(): number {
+  try {
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    const initialCount = (store.logs || []).length;
+    store.logs = (store.logs || []).filter((log) => {
+      const logTime = new Date(log.timestamp).getTime();
+      return !isNaN(logTime) && logTime >= cutoff;
+    });
+    const purgedCount = initialCount - store.logs.length;
+    if (purgedCount > 0) {
+      console.log(`🧹 [AUTO LOG CLEANUP] Purged ${purgedCount} logs older than 24 hours.`);
+      saveStore();
+    }
+    cleanLogsOlderThanHoursInDb(24).catch((e) => {
+      console.warn("[AUTO LOG CLEANUP] DB log purge warning:", e?.message || e);
+    });
+    return purgedCount;
+  } catch (err: any) {
+    console.error("[AUTO LOG CLEANUP] Error during 24h log purge:", err?.message || err);
+    return 0;
+  }
 }
 
 function cleanChannelIdentifier(input: string | null | undefined): string {
@@ -695,14 +715,7 @@ async function sendBotMedia(
   }
 }
 
-// Default Configuration Constants for Engagement & Promotion
-export const DEFAULT_REACTION_SETTINGS: ReactionSettings = {
-  enableReactions: true,
-  emojis: ["👍", "❤️", "🔥", "👏"],
-  allowMultiple: false,
-  totalReactionsCount: 0,
-};
-
+// Default Configuration Constants for Sponsored Ad Banner & Inline Buttons
 export const DEFAULT_INTERACTIVE_BUTTONS_SETTINGS: InteractiveButtonsSettings = {
   enableButtons: true,
   enableChannelJoinButton: true,
@@ -720,7 +733,16 @@ export const DEFAULT_AD_BANNER_SETTINGS: AdBannerSettings = {
   hourInterval: 6,
   adText: "📢 <b>حامی مالی کانال</b>\n\nجهت رزرو تبلیغات و درج بنر در کانال با پشتیبانی در ارتباط باشید.\n🌐 <i>بازدید بالا و بازدهی عالی</i>",
   adMediaUrl: "",
-  adButtonText: "💬 ارتباط با بخش تبلیغات",
+  adMediaBase64: "",
+  adMediaFileName: "",
+  adMediaType: "photo",
+  enableButtons: true,
+  buttons: [
+    { id: "btn_1", text: "🤖 ورود به ربات", url: "https://t.me/BotFather", row: 1 },
+    { id: "btn_2", text: "📢 کانال اسپانسر", url: "https://t.me/telegram", row: 1 },
+    { id: "btn_3", text: "💬 رزرو تبلیغات", url: "https://t.me/admin", row: 2 },
+  ],
+  adButtonText: "",
   adButtonUrl: "",
   pinAdMessage: false,
   postsSinceLastAd: 0,
@@ -728,86 +750,48 @@ export const DEFAULT_AD_BANNER_SETTINGS: AdBannerSettings = {
   lastAdSentAt: undefined,
 };
 
-function buildPostInlineKeyboard(chatId: string, messageId?: number) {
-  const rxConfig = store.settings?.reactionSettings || DEFAULT_REACTION_SETTINGS;
-  const btnConfig = store.settings?.interactiveButtonsSettings || DEFAULT_INTERACTIVE_BUTTONS_SETTINGS;
+export function buildAdBannerInlineKeyboard(ad: AdBannerSettings) {
+  if (ad.enableButtons === false) return undefined;
+
   const rows: any[][] = [];
 
-  // 1. Reactions Row (Interactive Emoji Counters)
-  if (rxConfig.enableReactions && Array.isArray(rxConfig.emojis) && rxConfig.emojis.length > 0) {
-    const rxKey = `${chatId}_${messageId || 0}`;
-    const counts = (store as any).reactionCounts?.[rxKey] || {};
-    const rxRow: any[] = [];
-    rxConfig.emojis.forEach((emoji, idx) => {
-      const c = counts[emoji] || 0;
-      const countLabel = c > 0 ? ` ${c}` : "";
-      rxRow.push({
-        text: `${emoji}${countLabel}`,
-        callback_data: `rx_${idx}_${messageId || 0}`,
-      });
+  if (Array.isArray(ad.buttons) && ad.buttons.length > 0) {
+    const rowMap: Record<number, any[]> = {};
+    const unassigned: any[] = [];
+
+    ad.buttons.forEach((btn) => {
+      const text = btn.text?.trim();
+      const url = btn.url?.trim();
+      if (!text || !url) return;
+
+      const r = btn.row || 0;
+      const btnObj = { text, url };
+      if (r > 0) {
+        if (!rowMap[r]) rowMap[r] = [];
+        rowMap[r].push(btnObj);
+      } else {
+        unassigned.push(btnObj);
+      }
     });
-    if (rxRow.length > 0) {
-      rows.push(rxRow);
-    }
-  }
 
-  // 2. Interactive Buttons (Join channel & Share)
-  if (btnConfig.enableButtons) {
-    const actionRow: any[] = [];
-    if (btnConfig.enableChannelJoinButton) {
-      let joinUrl = btnConfig.channelJoinUrl?.trim();
-      if (!joinUrl) {
-        const dest = store.settings?.destinationChannel;
-        if (dest && dest.startsWith("@")) {
-          joinUrl = `https://t.me/${dest.replace("@", "")}`;
-        }
-      }
-      if (joinUrl) {
-        actionRow.push({
-          text: btnConfig.channelJoinText || "📢 عضویت در کانال",
-          url: joinUrl,
-        });
-      }
+    const sortedRowNums = Object.keys(rowMap).map(Number).sort((a, b) => a - b);
+    for (const rNum of sortedRowNums) {
+      rows.push(rowMap[rNum]);
     }
 
-    if (btnConfig.enableShareButton) {
-      let shareTarget = "";
-      const dest = store.settings?.destinationChannel;
-      if (dest && dest.startsWith("@") && messageId) {
-        shareTarget = `https://t.me/${dest.replace("@", "")}/${messageId}`;
-      } else if (dest && dest.startsWith("@")) {
-        shareTarget = `https://t.me/${dest.replace("@", "")}`;
+    let tempRow: any[] = [];
+    unassigned.forEach((b) => {
+      tempRow.push(b);
+      if (tempRow.length >= 2) {
+        rows.push(tempRow);
+        tempRow = [];
       }
-      const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(shareTarget || "https://t.me")}&text=${encodeURIComponent("مشاهده در کانال")}`;
-      actionRow.push({
-        text: btnConfig.shareText || "🔄 بازنشر",
-        url: shareUrl,
-      });
+    });
+    if (tempRow.length > 0) {
+      rows.push(tempRow);
     }
-
-    if (actionRow.length > 0) {
-      rows.push(actionRow);
-    }
-
-    // 3. Custom Interactive Buttons (arranged up to 2 per row)
-    if (Array.isArray(btnConfig.customButtons) && btnConfig.customButtons.length > 0) {
-      let currentRow: any[] = [];
-      btnConfig.customButtons.forEach((btn) => {
-        if (btn.text && btn.url) {
-          currentRow.push({
-            text: btn.text.trim(),
-            url: btn.url.trim(),
-          });
-          if (currentRow.length >= 2) {
-            rows.push(currentRow);
-            currentRow = [];
-          }
-        }
-      });
-      if (currentRow.length > 0) {
-        rows.push(currentRow);
-      }
-    }
+  } else if (ad.adButtonText?.trim() && ad.adButtonUrl?.trim()) {
+    rows.push([{ text: ad.adButtonText.trim(), url: ad.adButtonUrl.trim() }]);
   }
 
   return rows.length > 0 ? { inline_keyboard: rows } : undefined;
@@ -832,22 +816,50 @@ async function dispatchAdBanner(isTest: boolean = false): Promise<{ success: boo
       return { success: false, message: "بنر تبلیغاتی غیرفعال است." };
     }
 
-    const rows: any[][] = [];
-    if (ad.adButtonText && ad.adButtonUrl) {
-      rows.push([{ text: ad.adButtonText.trim(), url: ad.adButtonUrl.trim() }]);
-    }
-    const replyMarkup = rows.length > 0 ? { inline_keyboard: rows } : undefined;
-
+    const replyMarkup = buildAdBannerInlineKeyboard(ad);
     let res: any;
-    if (ad.adMediaUrl && ad.adMediaUrl.trim()) {
-      const isVideo = ad.adMediaUrl.match(/\.(mp4|mov|avi|mkv)(\?.*)?$/i);
+
+    // 1. Check if user uploaded a direct media file (base64)
+    if (ad.adMediaBase64 && ad.adMediaBase64.startsWith("data:")) {
+      try {
+        const matches = ad.adMediaBase64.match(/^data:([A-Za-z-+\/0-9]+);base64,(.+)$/);
+        if (matches && matches.length === 3) {
+          const mimeType = matches[1];
+          const base64Data = matches[2];
+          const buffer = Buffer.from(base64Data, "base64");
+          const isVideo = ad.adMediaType === "video" || mimeType.startsWith("video/");
+          const method = isVideo ? "sendVideo" : "sendPhoto";
+          const fieldName = isVideo ? "video" : "photo";
+          const ext = isVideo ? "mp4" : "jpg";
+          const fileName = ad.adMediaFileName || `banner.${ext}`;
+
+          res = await sendBotMedia(
+            token,
+            method,
+            dest,
+            buffer,
+            fileName,
+            fieldName,
+            ad.adText || "",
+            "HTML",
+            replyMarkup
+          );
+        }
+      } catch (uploadErr) {
+        console.error("[AD BANNER BASE64 UPLOAD ERROR]", uploadErr);
+      }
+    }
+
+    // 2. Check if user provided direct media URL
+    if (!res && ad.adMediaUrl && ad.adMediaUrl.trim()) {
+      const isVideo = ad.adMediaType === "video" || ad.adMediaUrl.match(/\.(mp4|mov|avi|mkv)(\?.*)?$/i);
       const method = isVideo ? "sendVideo" : "sendPhoto";
       const paramKey = isVideo ? "video" : "photo";
 
       res = await callTelegramBotApi(token, method, {
         chat_id: dest,
         [paramKey]: ad.adMediaUrl.trim(),
-        caption: ad.adText,
+        caption: ad.adText || "",
         parse_mode: "HTML",
         reply_markup: replyMarkup,
       });
@@ -860,10 +872,13 @@ async function dispatchAdBanner(isTest: boolean = false): Promise<{ success: boo
           reply_markup: replyMarkup,
         });
       }
-    } else {
+    }
+
+    // 3. Fallback: text-only banner
+    if (!res) {
       res = await callTelegramBotApi(token, "sendMessage", {
         chat_id: dest,
-        text: ad.adText,
+        text: ad.adText || "📢 <b>حامی مالی کانال</b>",
         parse_mode: "HTML",
         reply_markup: replyMarkup,
       });
@@ -886,20 +901,22 @@ async function dispatchAdBanner(isTest: boolean = false): Promise<{ success: boo
       addLog(
         "ad_banner",
         "ad_sponsor",
-        "بنر تبلیغاتی خودکار",
+        "بنر تبلیغاتی اسپانسر",
         res.result?.message_id || 0,
         "text",
         "success",
-        isTest ? "بنر تبلیغاتی تستی با موفقیت به کانال مقصد ارسال شد." : "بنر تبلیغاتی زمان‌بندی‌شده به کانال مقصد ارسال شد."
+        isTest
+          ? "بنر تبلیغاتی اسپانسر به همراه دکمه‌های شیشه‌ای تستی با موفقیت به کانال مقصد ارسال شد."
+          : "بنر تبلیغاتی خودکار اسپانسر با موفقیت در کانال مقصد منتشر شد."
       );
 
-      return { success: true, message: "بنر تبلیغاتی با موفقیت به کانال مقصد ارسال شد." };
+      return { success: true, message: "بنر تبلیغاتی اسپانسر با موفقیت به کانال مقصد ارسال شد." };
     } else {
       const err = humanizeTelegramError(res.description);
       addLog(
         "ad_banner",
         "ad_sponsor",
-        "بنر تبلیغاتی خودکار",
+        "بنر تبلیغاتی اسپانسر",
         0,
         "text",
         "error",
@@ -2228,7 +2245,8 @@ async function startServer() {
   console.log(`[SERVER] Configured PORT from process.env.PORT: ${process.env.PORT ? process.env.PORT : "not set (defaulting to " + PORT + ")"}`);
 
   const app = express();
-  app.use(express.json());
+  app.use(express.json({ limit: "50mb" }));
+  app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
   let botPollerBackoffUntil = 0;
 
@@ -2288,11 +2306,8 @@ async function startServer() {
       if (!store.sources) store.sources = [];
       if (!store.logs) store.logs = [];
       if (!store.stats) store.stats = { totalTransferred: 0, failedMessages: 0, startTime: new Date().toISOString() };
-      if (!store.settings.reactionSettings) store.settings.reactionSettings = { ...DEFAULT_REACTION_SETTINGS };
       if (!store.settings.interactiveButtonsSettings) store.settings.interactiveButtonsSettings = { ...DEFAULT_INTERACTIVE_BUTTONS_SETTINGS };
       if (!store.settings.adBannerSettings) store.settings.adBannerSettings = { ...DEFAULT_AD_BANNER_SETTINGS };
-      if (!(store as any).reactionCounts) (store as any).reactionCounts = {};
-      if (!(store as any).reactionVotes) (store as any).reactionVotes = {};
 
       // 3. Environment variables override for credentials
       if (process.env.BOT_TOKEN) {
@@ -2370,7 +2385,8 @@ async function startServer() {
           let sentSuccess = false;
           const mediaMeta = item.mediaMetadata;
           const caption = item.formattedText || item.messageText || "";
-          const postKeyboard = buildPostInlineKeyboard(destination, item.originalMessageId);
+          // Glass interactive buttons are strictly reserved for sponsored ad banners, not standard forwarded posts
+          const postKeyboard = undefined;
 
           if (mediaMeta?.bufferBase64 && item.mediaType && item.mediaType !== "text") {
             const buffer = Buffer.from(mediaMeta.bufferBase64, "base64");
@@ -2493,6 +2509,14 @@ async function startServer() {
           }
         }
       }, 5 * 60 * 1000);
+
+      // Scheduled 24-Hour Log Cleanup (Runs every 30 minutes, keeping logs strictly within 24h window)
+      setInterval(() => {
+        cleanupLogsOlderThan24Hours();
+      }, 30 * 60 * 1000);
+      setTimeout(() => {
+        cleanupLogsOlderThan24Hours();
+      }, 5000);
 
       // Scheduled Daily Digest & 24-Hour Database Backup at 00:00 Tehran Time
       let lastDailyDigestSentDate = "";
@@ -3989,59 +4013,7 @@ async function startServer() {
     res.status(400).json({ success: false, message: "تنظیمات نامعتبر است." });
   });
 
-  // --- Reaction Counter API Endpoints ---
-  app.get("/api/reactions", (req, res) => {
-    const reactions = store.settings.reactionSettings || DEFAULT_REACTION_SETTINGS;
-    res.json({ success: true, reactions });
-  });
-
-  app.post("/api/reactions", (req, res) => {
-    const config = req.body;
-    if (config && typeof config === "object") {
-      const prev = store.settings.reactionSettings || DEFAULT_REACTION_SETTINGS;
-      store.settings.reactionSettings = {
-        ...DEFAULT_REACTION_SETTINGS,
-        ...prev,
-        ...config,
-      };
-      saveStore();
-      addLog("system", "system", "شمارنده ری‌اکشن", 0, "config", "success", "تنظیمات دکمه‌های ری‌اکشن ایموجی با موفقیت به‌روزرسانی شد.");
-      return res.json({
-        success: true,
-        message: "تنظیمات شمارنده ری‌اکشن‌ها با موفقیت ذخیره گردید.",
-        reactions: store.settings.reactionSettings,
-      });
-    }
-    res.status(400).json({ success: false, message: "داده‌های ورودی نامعتبر است." });
-  });
-
-  // --- Interactive Inline Buttons API Endpoints ---
-  app.get("/api/interactive-buttons", (req, res) => {
-    const buttons = store.settings.interactiveButtonsSettings || DEFAULT_INTERACTIVE_BUTTONS_SETTINGS;
-    res.json({ success: true, buttons });
-  });
-
-  app.post("/api/interactive-buttons", (req, res) => {
-    const config = req.body;
-    if (config && typeof config === "object") {
-      const prev = store.settings.interactiveButtonsSettings || DEFAULT_INTERACTIVE_BUTTONS_SETTINGS;
-      store.settings.interactiveButtonsSettings = {
-        ...DEFAULT_INTERACTIVE_BUTTONS_SETTINGS,
-        ...prev,
-        ...config,
-      };
-      saveStore();
-      addLog("system", "system", "دکمه‌های شیشه‌ای تعاملی", 0, "config", "success", "تنظیمات دکمه‌های شیشه‌ای تعاملی با موفقیت ذخیره شد.");
-      return res.json({
-        success: true,
-        message: "تنظیمات دکمه‌های تعاملی با موفقیت ذخیره گردید.",
-        buttons: store.settings.interactiveButtonsSettings,
-      });
-    }
-    res.status(400).json({ success: false, message: "داده‌های ورودی نامعتبر است." });
-  });
-
-  // --- Scheduled Ad Banner API Endpoints ---
+  // --- Sponsored Ad Banner & Glass Buttons API Endpoints ---
   app.get("/api/ad-banner", (req, res) => {
     const adBanner = store.settings.adBannerSettings || DEFAULT_AD_BANNER_SETTINGS;
     res.json({ success: true, adBanner });
@@ -4057,14 +4029,37 @@ async function startServer() {
         ...config,
       };
       saveStore();
-      addLog("system", "system", "بنر تبلیغاتی زمان‌بندی", 0, "config", "success", "تنظیمات بنر تبلیغاتی خودکار ذخیره شد.");
+      addLog("system", "system", "بنر تبلیغاتی و اسپانسر", 0, "config", "success", "تنظیمات بنر اسپانسر و دکمه‌های شیشه‌ای ذخیره شد.");
       return res.json({
         success: true,
-        message: "تنظیمات بنر تبلیغاتی زمان‌بندی‌شده با موفقیت ذخیره گردید.",
+        message: "تنظیمات بنر تبلیغاتی اسپانسر با موفقیت ذخیره گردید.",
         adBanner: store.settings.adBannerSettings,
       });
     }
     res.status(400).json({ success: false, message: "داده‌های ورودی نامعتبر است." });
+  });
+
+  app.post("/api/ad-banner/upload", (req, res) => {
+    const { base64, fileName, mimeType, mediaType } = req.body;
+    if (!base64 || typeof base64 !== "string") {
+      return res.status(400).json({ success: false, message: "فایل ارسالی نامعتبر است." });
+    }
+
+    const prev = store.settings.adBannerSettings || DEFAULT_AD_BANNER_SETTINGS;
+    store.settings.adBannerSettings = {
+      ...prev,
+      adMediaBase64: base64,
+      adMediaFileName: fileName || "banner_file",
+      adMediaType: mediaType || (mimeType?.startsWith("video/") ? "video" : "photo"),
+      adMediaUrl: "", // prefer direct file upload
+    };
+    saveStore();
+    addLog("system", "system", "آپلود بنر اسپانسر", 0, "config", "success", `فایل بنر تبلیغاتی ${fileName || ""} با موفقیت بارگذاری شد.`);
+    return res.json({
+      success: true,
+      message: "فایل بنر تبلیغاتی با موفقیت آپلود گردید.",
+      adBanner: store.settings.adBannerSettings,
+    });
   });
 
   app.post("/api/ad-banner/send-now", async (req, res) => {
@@ -4073,33 +4068,6 @@ async function startServer() {
       res.json(result);
     } else {
       res.status(400).json(result);
-    }
-  });
-
-  app.post("/api/engagement/test-post", async (req, res) => {
-    try {
-      const token = store.settings?.botToken;
-      const dest = store.settings?.destinationChannel;
-      if (!token || !dest) {
-        return res.status(400).json({ success: false, message: "ربات یا کانال مقصد تنظیم نشده است." });
-      }
-      const sampleText = (req.body?.text && req.body.text.trim()) || "✨ <b>پست آزمایشی دکمه‌های تعاملی و ری‌اکشن</b>\n\nاین یک پیام نمونه است تا عملکرد دکمه‌های شیشه‌ای، لینک‌ها و شمارنده ری‌اکشن‌ها را در کانال مقصد بررسی کنید.";
-      const postMarkup = buildPostInlineKeyboard(dest, Date.now() % 100000);
-      const tgRes = await callTelegramBotApi(token, "sendMessage", {
-        chat_id: dest,
-        text: sampleText,
-        parse_mode: "HTML",
-        reply_markup: postMarkup,
-      });
-      if (tgRes.ok) {
-        addLog("system", "system", "تست تعاملی", tgRes.result?.message_id || 0, "text", "success", "پست تستی با دکمه‌های تعاملی و ری‌اکشن به کانال مقصد ارسال شد.");
-        saveStore();
-        return res.json({ success: true, message: "پست نمونه با موفقیت به کانال مقصد ارسال شد!" });
-      } else {
-        return res.status(400).json({ success: false, message: humanizeTelegramError(tgRes.description) });
-      }
-    } catch (err: any) {
-      return res.status(500).json({ success: false, message: err.message });
     }
   });
 
@@ -4118,6 +4086,36 @@ async function startServer() {
   app.get("/api/queue/stats", (req, res) => {
     const stats = defaultQueueService.getStats();
     res.json({ success: true, stats });
+  });
+
+  app.get("/api/queue/settings", (req, res) => {
+    res.json({ success: true, settings: defaultQueueService.getSettings() });
+  });
+
+  app.post("/api/queue/toggle-enable", (req, res) => {
+    const current = defaultQueueService.isQueueEnabled();
+    const updated = defaultQueueService.updateSettings({ isQueueEnabled: !current });
+    if (!store.settings) store.settings = {} as any;
+    store.settings.queueSettings = updated;
+    saveStore();
+    res.json({
+      success: true,
+      isQueueEnabled: updated.isQueueEnabled,
+      message: updated.isQueueEnabled
+        ? "صف ارسال هوشمند فعال شد (محافظت ضد مسدودی و تاخیر امن فعال است)."
+        : "صف ارسال غیرفعال شد (حالت ارسال مستقیم و بدون تاخیر فعال شد)."
+    });
+  });
+
+  app.post("/api/queue/release-deferred", (req, res) => {
+    const count = defaultQueueService.releasePostponedSilentHoursItems();
+    res.json({
+      success: true,
+      releasedCount: count,
+      message: count > 0
+        ? `تعداد ${count} پیام معلق تایم شب آزادسازی و در صف ارسال جاری قرار گرفتند.`
+        : "پیام معلقی ناشی از تایم شب در صف یافت نشد."
+    });
   });
 
   app.post("/api/queue/settings", async (req, res) => {
@@ -4506,10 +4504,25 @@ async function startServer() {
     res.json({ logs: store.logs });
   });
 
-  app.delete("/api/logs", (req, res) => {
+  app.post("/api/logs/purge-24h", (req, res) => {
+    const purged = cleanupLogsOlderThan24Hours();
+    res.json({
+      success: true,
+      purgedCount: purged,
+      remainingCount: (store.logs || []).length,
+      message: `لاگ‌های قدیمی‌تر از ۲۴ ساعت گذشته پاکسازی شدند (تعداد ${purged} لاگ حذف شد).`
+    });
+  });
+
+  app.delete("/api/logs", async (req, res) => {
     store.logs = [];
     saveStore();
-    res.json({ success: true, message: "تاریخچه فعالیت‌ها با موفقیت پاکسازی شد." });
+    try {
+      await clearLogsInDb();
+    } catch (e: any) {
+      console.warn("DB clear logs error:", e?.message || e);
+    }
+    res.json({ success: true, message: "تمام لاگ‌های سیستم با موفقیت پاکسازی شدند." });
   });
 
   app.get("/api/stats", (req, res) => {
@@ -4567,7 +4580,6 @@ async function startServer() {
       filteredMessages: totalFilteredOrUnsent,
       unsentMessages: totalFilteredOrUnsent,
       failedMessages: store.stats.failedMessages || errorCount,
-      totalReactionsCount: store.settings.reactionSettings?.totalReactionsCount || 0,
       totalAdsSent: store.settings.adBannerSettings?.totalAdsSent || 0,
       postsSinceLastAd: store.settings.adBannerSettings?.postsSinceLastAd || 0,
       hourlyActivity,
@@ -5488,67 +5500,6 @@ async function startServer() {
             const data = cq.data;
             const msgId = cq.message?.message_id;
             const chatId = cq.message?.chat?.id;
-
-            // Check for Public Reaction Clicks (accessible to all channel/group readers)
-            if (data && data.startsWith("rx_")) {
-              const parts = data.split("_");
-              const emojiIdx = parseInt(parts[1], 10);
-              const origMsgId = parts[2] ? parseInt(parts[2], 10) : msgId;
-              const rxConfig = store.settings?.reactionSettings || DEFAULT_REACTION_SETTINGS;
-              const emojiList = rxConfig.emojis || ["👍", "❤️", "🔥", "👏"];
-              const selectedEmoji = emojiList[emojiIdx] || "👍";
-
-              const rxKey = `${chatId}_${origMsgId}`;
-              if (!(store as any).reactionCounts) (store as any).reactionCounts = {};
-              if (!(store as any).reactionVotes) (store as any).reactionVotes = {};
-              if (!(store as any).reactionCounts[rxKey]) (store as any).reactionCounts[rxKey] = {};
-              if (!(store as any).reactionVotes[rxKey]) (store as any).reactionVotes[rxKey] = {};
-
-              const postVotes = (store as any).reactionVotes[rxKey];
-              const postCounts = (store as any).reactionCounts[rxKey];
-              const previousVote = postVotes[fromId];
-
-              let feedback = "";
-              if (previousVote === selectedEmoji) {
-                // Remove vote (toggle off)
-                postCounts[selectedEmoji] = Math.max(0, (postCounts[selectedEmoji] || 1) - 1);
-                delete postVotes[fromId];
-                feedback = `رأی شما برای ${selectedEmoji} برداشته شد.`;
-              } else {
-                if (previousVote && !rxConfig.allowMultiple) {
-                  // Decrement previous emoji
-                  postCounts[previousVote] = Math.max(0, (postCounts[previousVote] || 1) - 1);
-                }
-                postCounts[selectedEmoji] = (postCounts[selectedEmoji] || 0) + 1;
-                postVotes[fromId] = selectedEmoji;
-                feedback = `رأی شما با ${selectedEmoji} ثبت شد!`;
-                if (rxConfig) {
-                  rxConfig.totalReactionsCount = (rxConfig.totalReactionsCount || 0) + 1;
-                }
-              }
-
-              // Update the message reply markup on Telegram with fresh reaction numbers
-              const updatedMarkup = buildPostInlineKeyboard(String(chatId), origMsgId);
-              if (chatId && msgId && updatedMarkup) {
-                callTelegramBotApi(token, "editMessageReplyMarkup", {
-                  chat_id: chatId,
-                  message_id: msgId,
-                  reply_markup: updatedMarkup,
-                }).catch((err) => {
-                  console.warn("[REACTION EDIT WARNING]", err?.message || err);
-                });
-              }
-
-              // Answer callback query with immediate toast notification to the user
-              await callTelegramBotApi(token, "answerCallbackQuery", {
-                callback_query_id: cq.id,
-                text: feedback,
-                show_alert: false,
-              }).catch(() => {});
-
-              saveStore();
-              continue;
-            }
 
             if (!isTelegramUserAdmin(fromId, fromUsername)) {
               await callTelegramBotApi(token, "answerCallbackQuery", {

@@ -12,7 +12,6 @@ import {
   Layers,
   AlertTriangle,
   BellRing,
-  Heart,
   Megaphone,
   Sparkles,
   TrendingUp,
@@ -145,45 +144,18 @@ export const StatsOverview: React.FC<StatsOverviewProps> = ({
         </div>
       </div>
 
-      {/* Secondary Row: Engagement & Ad Monetization KPIs */}
+      {/* Secondary Row: Sponsored Ad Banner & Glass Buttons KPI */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {/* Reaction Counter KPI Card */}
-        <div
-          onClick={onNavigateToEngagement}
-          className="bg-white rounded-3xl border border-slate-200/80 p-5 shadow-xs flex items-center justify-between transition hover:border-rose-300 hover:shadow-sm cursor-pointer group"
-        >
-          <div className="space-y-1">
-            <div className="flex items-center gap-2">
-              <span className="text-2xs font-bold text-slate-400">واکنش‌ها و ری‌اکشن‌ها (Reactions)</span>
-              <span className="px-2 py-0.2 rounded-full bg-rose-50 text-rose-600 text-3xs font-black">
-                شمارنده هوشمند
-              </span>
-            </div>
-            <div className="flex items-baseline space-x-2 space-x-reverse">
-              <span className="text-2xl font-black text-rose-600">
-                {(stats.totalReactionsCount || 0).toLocaleString('fa-IR')}
-              </span>
-              <span className="text-2xs text-slate-500 font-medium">واکنش ثبت شده</span>
-            </div>
-            <p className="text-3xs text-slate-400">
-              دکمه‌های تعاملی شیشه‌ای و شمارش لحظه‌ای واکنش مخاطبان به پست‌های فوروارد شده
-            </p>
-          </div>
-          <div className="w-12 h-12 rounded-2xl bg-rose-50 border border-rose-100 flex items-center justify-center text-rose-600 group-hover:scale-110 transition">
-            <Heart className="w-6 h-6 text-rose-500" />
-          </div>
-        </div>
-
-        {/* Ad Banner KPI Card */}
+        {/* Ad Banner & Glass Buttons KPI Card */}
         <div
           onClick={onNavigateToAdBanner}
           className="bg-white rounded-3xl border border-slate-200/80 p-5 shadow-xs flex items-center justify-between transition hover:border-amber-300 hover:shadow-sm cursor-pointer group"
         >
           <div className="space-y-1">
             <div className="flex items-center gap-2">
-              <span className="text-2xs font-bold text-slate-400">تبلیغات زمان‌بندی و اسپانسر</span>
+              <span className="text-2xs font-bold text-slate-400">بنر و تبلیغات اسپانسر</span>
               <span className="px-2 py-0.2 rounded-full bg-amber-50 text-amber-700 text-3xs font-black">
-                Ad Banner
+                اسپانسر هوشمند
               </span>
             </div>
             <div className="flex items-baseline space-x-2 space-x-reverse">
@@ -195,11 +167,40 @@ export const StatsOverview: React.FC<StatsOverviewProps> = ({
               </span>
             </div>
             <p className="text-3xs text-slate-400">
-              انتشار خودکار بنرهای تبلیغاتی و اسپانسر براساس تعداد پست و بازه ساعتی
+              ارسال زمان‌بندی شده بنر آپلود شده همراه با دکمه‌های شیشه‌ای تعاملی
             </p>
           </div>
           <div className="w-12 h-12 rounded-2xl bg-amber-50 border border-amber-100 flex items-center justify-center text-amber-600 group-hover:scale-110 transition">
             <Megaphone className="w-6 h-6 text-amber-600" />
+          </div>
+        </div>
+
+        {/* Telegram Destination & Bot Status Card */}
+        <div className="bg-white rounded-3xl border border-slate-200/80 p-5 shadow-xs flex items-center justify-between">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="text-2xs font-bold text-slate-400">وضعیت اتصال و کانال مقصد</span>
+              <span className={`px-2 py-0.2 rounded-full text-3xs font-black ${
+                stats.destinationVerified ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-500'
+              }`}>
+                {stats.destinationVerified ? 'متصل و فعال' : 'در انتظار اتصال'}
+              </span>
+            </div>
+            <div className="flex items-baseline space-x-2 space-x-reverse">
+              <span className="text-lg font-black text-slate-800 font-mono">
+                {stats.botConnected ? 'ربات تلگرام آماده' : 'در حال همگام‌سازی'}
+              </span>
+            </div>
+            <p className="text-3xs text-slate-400">
+              پایش بلادرنگ صف ارسال، اتصال کلاینت و ربات به کانال هدف
+            </p>
+          </div>
+          <div className={`w-12 h-12 rounded-2xl border flex items-center justify-center ${
+            stats.destinationVerified
+              ? 'bg-emerald-50 border-emerald-100 text-emerald-600'
+              : 'bg-slate-50 border-slate-200 text-slate-400'
+          }`}>
+            <Zap className="w-6 h-6" />
           </div>
         </div>
       </div>

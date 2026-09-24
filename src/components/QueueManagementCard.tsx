@@ -23,13 +23,10 @@ import {
   Eye,
   X,
   Power,
-  PowerOff,
-  Image,
-  Video,
-  Music,
-  FileCode,
   Layers,
   Sparkles,
+  ArrowRightLeft,
+  CalendarCheck,
 } from 'lucide-react';
 import {
   getQueueItems,
@@ -42,14 +39,18 @@ import {
   clearAllQueue,
   sendQueueItemNow,
   deleteQueueItem,
-  toggleSystemPower,
+  toggleQueueEnable,
+  releaseDeferredNightMessages,
 } from '../lib/telegramApi';
 import { QueueItem, QueueSettings, QueueStats } from '../types';
+import { formatTehranTime, formatTehranDateTime } from '../lib/timeUtils';
 
 interface QueueManagementCardProps {
   isAdmin?: boolean;
   onRequireLogin?: () => void;
 }
+
+type ActiveTab = 'scheduled' | 'sent' | 'failed' | 'settings' | null;
 
 export const QueueManagementCard: React.FC<QueueManagementCardProps> = ({
   isAdmin = true,
@@ -64,6 +65,7 @@ export const QueueManagementCard: React.FC<QueueManagementCardProps> = ({
     failedCount: 0,
     totalQueued: 0,
     isQueuePaused: false,
+    isQueueEnabled: true,
     isEmergencyHalted: false,
     currentRatePerMinute: 0,
   });
@@ -77,24 +79,33 @@ export const QueueManagementCard: React.FC<QueueManagementCardProps> = ({
     minIntervalSeconds: 5,
     maxMessagesPerMinute: 12,
     isQueuePaused: false,
+    isQueueEnabled: true,
   });
 
-  const [statusFilter, setStatusFilter] = useState<string>('all');
+  // Collapsible active tab: if null, all lists are folded for maximum performance and minimalism
+  const [activeTab, setActiveTab] = useState<ActiveTab>(null);
+
   const [searchQuery, setSearchQuery] = useState<string>('');
+  const [itemsLimit, setItemsLimit] = useState<number>(10);
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [isTogglingMaster, setIsTogglingMaster] = useState<boolean>(false);
+  const [isReleasingNight, setIsReleasingNight] = useState<boolean>(false);
   const [isSavingSettings, setIsSavingSettings] = useState<boolean>(false);
-  const [showSettingsDrawer, setShowSettingsDrawer] = useState<boolean>(false);
-  const [showArchitectureGuide, setShowArchitectureGuide] = useState<boolean>(false);
-  const [confirmClearAllModal, setConfirmClearAllModal] = useState<boolean>(false);
   const [previewItem, setPreviewItem] = useState<QueueItem | null>(null);
   const [actionInProgressId, setActionInProgressId] = useState<string | null>(null);
   const [feedbackMessage, setFeedbackMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
+  // Fetch queue items and stats
   const fetchQueueData = useCallback(async () => {
-    setIsLoading(true);
     try {
+      // Determine what status to query based on open tab
+      let statusQuery = 'all';
+      if (activeTab === 'scheduled') statusQuery = 'scheduled';
+      else if (activeTab === 'sent') statusQuery = 'sent';
+      else if (activeTab === 'failed') statusQuery = 'failed';
+
       const [itemsRes, statsRes] = await Promise.all([
-        getQueueItems(statusFilter, 100),
+        getQueueItems(statusQuery, 80),
         getQueueStats(),
       ]);
 
@@ -109,10 +120,8 @@ export const QueueManagementCard: React.FC<QueueManagementCardProps> = ({
       }
     } catch (err) {
       console.error('Error fetching queue:', err);
-    } finally {
-      setIsLoading(false);
     }
-  }, [statusFilter]);
+  }, [activeTab]);
 
   useEffect(() => {
     fetchQueueData();
@@ -125,6 +134,60 @@ export const QueueManagementCard: React.FC<QueueManagementCardProps> = ({
     setTimeout(() => setFeedbackMessage(null), 4000);
   };
 
+  // Toggle Tab
+  const toggleTab = (tab: ActiveTab) => {
+    setItemsLimit(10);
+    setSearchQuery('');
+    setActiveTab(prev => (prev === tab ? null : tab));
+  };
+
+  // Master One-Click Queue Toggle (Enable/Disable)
+  const handleToggleQueueMaster = async () => {
+    if (!isAdmin && onRequireLogin) {
+      onRequireLogin();
+      return;
+    }
+    setIsTogglingMaster(true);
+    try {
+      const res = await toggleQueueEnable();
+      if (res.success) {
+        showFeedback(res.message);
+        setStats(prev => ({ ...prev, isQueueEnabled: res.isQueueEnabled }));
+        setSettings(prev => ({ ...prev, isQueueEnabled: res.isQueueEnabled }));
+        await fetchQueueData();
+      } else {
+        showFeedback(res.message || 'خطا در تغییر وضعیت صف', 'error');
+      }
+    } catch (err: any) {
+      showFeedback(err.message || 'خطا در برقراری ارتباط با سرور', 'error');
+    } finally {
+      setIsTogglingMaster(false);
+    }
+  };
+
+  // Release Night / Deferred Messages
+  const handleReleaseNightMessages = async () => {
+    if (!isAdmin && onRequireLogin) {
+      onRequireLogin();
+      return;
+    }
+    setIsReleasingNight(true);
+    try {
+      const res = await releaseDeferredNightMessages();
+      if (res.success) {
+        showFeedback(res.message);
+        await fetchQueueData();
+      } else {
+        showFeedback(res.message || 'خطا در آزادسازی پیام‌های معلق', 'error');
+      }
+    } catch (err: any) {
+      showFeedback(err.message || 'خطا در آزادسازی پیام‌ها', 'error');
+    } finally {
+      setIsReleasingNight(false);
+    }
+  };
+
+  // Pause / Resume Queue
   const handleTogglePause = async () => {
     if (!isAdmin && onRequireLogin) {
       onRequireLogin();
@@ -134,7 +197,7 @@ export const QueueManagementCard: React.FC<QueueManagementCardProps> = ({
       if (stats.isQueuePaused) {
         const res = await resumeQueue();
         if (res.success) {
-          showFeedback('صف ارسال هوشمند با موفقیت فعال شد و ارسال‌ها ادامه می‌یابند.');
+          showFeedback('صف ارسال هوشمند با موفقیت فعال شد.');
           fetchQueueData();
         }
       } else {
@@ -149,29 +212,7 @@ export const QueueManagementCard: React.FC<QueueManagementCardProps> = ({
     }
   };
 
-  const handleToggleEmergencyPower = async () => {
-    if (!isAdmin && onRequireLogin) {
-      onRequireLogin();
-      return;
-    }
-    try {
-      const nextTurnOff = !stats.isEmergencyHalted;
-      const res = await toggleSystemPower(nextTurnOff);
-      if (res.success) {
-        showFeedback(
-          res.isSystemTurnedOff
-            ? '🛑 کلید خاموش اضطراری فعال شد: کلیه فرایندهای رصد کانال‌ها و ارسال پیام‌ها متوقف شدند.'
-            : '🟢 سامانه مجدداً روشن و فعال شد: رصد و صف ارسال از سر گرفته شدند.'
-        );
-        fetchQueueData();
-      } else {
-        showFeedback(res.message || 'خطا در تغییر وضعیت برق اضطراری سامانه', 'error');
-      }
-    } catch (err: any) {
-      showFeedback(err.message || 'خطای شبکه در اعمال کلید خاموش اضطراری', 'error');
-    }
-  };
-
+  // Retry Failed
   const handleRetryFailed = async () => {
     if (!isAdmin && onRequireLogin) {
       onRequireLogin();
@@ -180,7 +221,7 @@ export const QueueManagementCard: React.FC<QueueManagementCardProps> = ({
     try {
       const res = await retryFailedQueue();
       if (res.success) {
-        showFeedback(`تعداد ${res.count} پیام خطادار مجدداً با تاخیر امن در صف قرار گرفت.`);
+        showFeedback(res.message || `تعداد ${res.count} پیام مجدداً در صف قرار گرفت.`);
         fetchQueueData();
       }
     } catch (err: any) {
@@ -188,6 +229,7 @@ export const QueueManagementCard: React.FC<QueueManagementCardProps> = ({
     }
   };
 
+  // Clear Failed
   const handleClearFailed = async () => {
     if (!isAdmin && onRequireLogin) {
       onRequireLogin();
@@ -197,33 +239,33 @@ export const QueueManagementCard: React.FC<QueueManagementCardProps> = ({
     try {
       const res = await clearFailedQueue();
       if (res.success) {
-        showFeedback(`تعداد ${res.count} پیام خطادار از صف پاک شد.`);
+        showFeedback(res.message || `تعداد ${res.count} پیام خطادار از صف پاک شد.`);
         fetchQueueData();
       }
     } catch (err: any) {
-      showFeedback(err.message || 'خطا در پاک‌سازی صف', 'error');
+      showFeedback(err.message || 'خطا در پاک‌سازی', 'error');
     }
   };
 
-  const handleClearAllQueue = async () => {
+  // Clear All Queue
+  const handleClearAll = async () => {
     if (!isAdmin && onRequireLogin) {
       onRequireLogin();
       return;
     }
+    if (!window.confirm('آیا از پاک‌سازی کامل تمام پیام‌های موجود در صف اطمینان دارید؟')) return;
     try {
       const res = await clearAllQueue();
       if (res.success) {
-        showFeedback(res.message || 'صف ارسال هوشمند با موفقیت خالی شد.');
-        setConfirmClearAllModal(false);
+        showFeedback(res.message || 'صف ارسال با موفقیت پاکسازی شد.');
         fetchQueueData();
-      } else {
-        showFeedback(res.message || 'خطا در تخلیه صف', 'error');
       }
     } catch (err: any) {
-      showFeedback(err.message || 'خطای شبکه در تخلیه صف', 'error');
+      showFeedback(err.message || 'خطا در پاک‌سازی کامل صف', 'error');
     }
   };
 
+  // Send Single Item Now
   const handleSendNow = async (id: string) => {
     if (!isAdmin && onRequireLogin) {
       onRequireLogin();
@@ -233,65 +275,41 @@ export const QueueManagementCard: React.FC<QueueManagementCardProps> = ({
     try {
       const res = await sendQueueItemNow(id);
       if (res.success) {
-        showFeedback('پیام برای ارسال فوری اولویت‌بندی شد.');
+        showFeedback('پیام برای ارسال آنی در اولویت اول صف قرار گرفت.');
         fetchQueueData();
       } else {
-        showFeedback(res.message || 'خطا در اولویت‌بندی ارسال', 'error');
+        showFeedback(res.message || 'خطا در ارسال فوری پیام', 'error');
       }
     } catch (err: any) {
-      showFeedback(err.message || 'خطای شبکه', 'error');
+      showFeedback(err.message || 'خطا در اولویت‌بندی پیام', 'error');
     } finally {
       setActionInProgressId(null);
     }
   };
 
+  // Delete Single Item
   const handleDeleteItem = async (id: string) => {
     if (!isAdmin && onRequireLogin) {
       onRequireLogin();
       return;
     }
+    setActionInProgressId(id);
     try {
       const res = await deleteQueueItem(id);
       if (res.success) {
-        showFeedback('پیام با موفقیت از صف حذف گردید.');
-        setItems(prev => prev.filter(i => i.id !== id));
+        showFeedback('پیام با موفقیت از صف حذف شد.');
+        fetchQueueData();
+      } else {
+        showFeedback(res.message || 'خطا در حذف پیام', 'error');
       }
     } catch (err: any) {
       showFeedback(err.message || 'خطا در حذف پیام', 'error');
+    } finally {
+      setActionInProgressId(null);
     }
   };
 
-  const handleApplyPreset = (type: 'safe' | 'standard' | 'fast') => {
-    if (type === 'safe') {
-      setSettings(prev => ({
-        ...prev,
-        minDelaySeconds: 20,
-        maxDelaySeconds: 80,
-        minIntervalSeconds: 8,
-        maxMessagesPerMinute: 8,
-      }));
-      showFeedback('پروفایل «فوق‌العاده امن (ضدبلاک)» انتخاب شد. لطفاً ذخیره را بزنید.');
-    } else if (type === 'standard') {
-      setSettings(prev => ({
-        ...prev,
-        minDelaySeconds: 10,
-        maxDelaySeconds: 45,
-        minIntervalSeconds: 5,
-        maxMessagesPerMinute: 12,
-      }));
-      showFeedback('پروفایل «استاندارد متعادل» انتخاب شد.');
-    } else {
-      setSettings(prev => ({
-        ...prev,
-        minDelaySeconds: 3,
-        maxDelaySeconds: 12,
-        minIntervalSeconds: 2,
-        maxMessagesPerMinute: 20,
-      }));
-      showFeedback('پروفایل «ارسال سریع» انتخاب شد.');
-    }
-  };
-
+  // Save Settings
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!isAdmin && onRequireLogin) {
@@ -302,836 +320,832 @@ export const QueueManagementCard: React.FC<QueueManagementCardProps> = ({
     try {
       const res = await updateQueueSettings(settings);
       if (res.success) {
-        showFeedback('تنظیمات صف و زمان‌بندی هوشمند با موفقیت ذخیره شد.');
-        setShowSettingsDrawer(false);
+        showFeedback('تنظیمات صف هوشمند با موفقیت ذخیره شد.');
+        if (res.settings) {
+          setSettings(res.settings);
+        }
         fetchQueueData();
       } else {
         showFeedback(res.message || 'خطا در ذخیره تنظیمات', 'error');
       }
     } catch (err: any) {
-      showFeedback(err.message || 'خطا در برقراری ارتباط', 'error');
+      showFeedback(err.message || 'خطا در ذخیره تنظیمات', 'error');
     } finally {
       setIsSavingSettings(false);
     }
   };
 
-  const formatScheduledTime = (isoString?: string) => {
-    if (!isoString) return 'نامشخص';
-    try {
-      const target = new Date(isoString).getTime();
-      const diffSec = Math.round((target - Date.now()) / 1000);
-      if (diffSec <= 0) return 'هم‌اکنون';
-      if (diffSec < 60) return `${diffSec} ثانیه دیگر`;
-      const diffMin = Math.round(diffSec / 60);
-      if (diffMin < 60) return `${diffMin} دقیقه دیگر`;
-      const diffHours = Math.round(diffMin / 60);
-      return `${diffHours} ساعت دیگر`;
-    } catch {
-      return isoString;
-    }
-  };
-
+  // Filter items for current active tab
   const filteredItems = useMemo(() => {
-    let list = items;
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase().trim();
-      list = list.filter(item => {
-        const idMatch = String(item.originalMessageId).includes(q);
-        const titleMatch = (item.sourceChannelTitle || '').toLowerCase().includes(q);
-        const userMatch = (item.sourceChannelUsername || '').toLowerCase().includes(q);
-        const textMatch = (item.messageText || item.formattedText || '').toLowerCase().includes(q);
-        return idMatch || titleMatch || userMatch || textMatch;
-      });
-    }
-    return list;
-  }, [items, searchQuery]);
+    return items.filter(item => {
+      // Tab filter
+      if (activeTab === 'scheduled') {
+        if (item.status !== 'scheduled' && item.status !== 'pending' && item.status !== 'sending') return false;
+      } else if (activeTab === 'sent') {
+        if (item.status !== 'sent') return false;
+      } else if (activeTab === 'failed') {
+        if (item.status !== 'failed') return false;
+      }
 
-  const getMediaIcon = (mediaType?: string) => {
-    switch (mediaType) {
-      case 'photo':
-        return <Image className="w-3.5 h-3.5 text-blue-500" />;
-      case 'video':
-        return <Video className="w-3.5 h-3.5 text-purple-500" />;
-      case 'audio':
-        return <Music className="w-3.5 h-3.5 text-emerald-500" />;
-      case 'document':
-        return <FileCode className="w-3.5 h-3.5 text-amber-500" />;
-      default:
-        return <FileText className="w-3.5 h-3.5 text-slate-400" />;
-    }
-  };
+      // Search filter
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase();
+        const textMatch = item.messageText?.toLowerCase().includes(q) || false;
+        const titleMatch = item.sourceChannelTitle?.toLowerCase().includes(q) || false;
+        const userMatch = item.sourceChannelUsername?.toLowerCase().includes(q) || false;
+        return textMatch || titleMatch || userMatch;
+      }
+      return true;
+    });
+  }, [items, activeTab, searchQuery]);
 
-  const getStatusBadge = (status: string) => {
-    switch (status) {
-      case 'scheduled':
-        return (
-          <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-bold bg-amber-50 text-amber-700 border border-amber-200">
-            <Timer className="w-3 h-3 ml-1 text-amber-600" />
-            زمان‌بندی‌شده
-          </span>
-        );
-      case 'sending':
-        return (
-          <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-bold bg-blue-50 text-blue-700 border border-blue-200 animate-pulse">
-            <Send className="w-3 h-3 ml-1 text-blue-600" />
-            در حال ارسال
-          </span>
-        );
-      case 'sent':
-        return (
-          <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
-            <CheckCircle2 className="w-3 h-3 ml-1 text-emerald-600" />
-            ارسال‌شده
-          </span>
-        );
-      case 'failed':
-        return (
-          <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-bold bg-rose-50 text-rose-700 border border-rose-200">
-            <XCircle className="w-3 h-3 ml-1 text-rose-600" />
-            خطا در ارسال
-          </span>
-        );
-      default:
-        return (
-          <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-bold bg-slate-100 text-slate-700 border border-slate-200">
-            <Clock className="w-3 h-3 ml-1 text-slate-500" />
-            در صف انتظار
-          </span>
-        );
-    }
-  };
+  const displayedItems = useMemo(() => {
+    return filteredItems.slice(0, itemsLimit);
+  }, [filteredItems, itemsLimit]);
+
+  const isQueueActive = stats.isQueueEnabled !== false;
 
   return (
-    <div className="bg-white rounded-3xl border border-slate-200/80 shadow-xs overflow-hidden">
-      {/* Top Emergency Halt Banner if System is Turned Off */}
-      {stats.isEmergencyHalted && (
-        <div className="bg-rose-600 text-white px-6 py-3 text-xs font-bold flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 shadow-inner">
-          <div className="flex items-center gap-2">
-            <PowerOff className="w-4 h-4 text-white shrink-0 animate-pulse" />
-            <span>
-              <strong>هشدار کلید خاموش اضطراری:</strong> سامانه در وضعیت خاموش اضطراری قرار دارد. مانیتورینگ کانال‌ها و صف ارسال کاملاً متوقف شده‌اند.
-            </span>
+    <div id="queue-management-container" className="bg-white rounded-2xl border border-slate-200/90 shadow-sm p-4 sm:p-5 transition-all">
+      {/* Feedback Toast */}
+      {feedbackMessage && (
+        <div
+          id="queue-feedback-toast"
+          className={`mb-4 p-3 rounded-xl text-xs font-medium flex items-center justify-between border transition-all animate-fadeIn ${
+            feedbackMessage.type === 'success'
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+              : 'bg-rose-50 border-rose-200 text-rose-800'
+          }`}
+        >
+          <div className="flex items-center space-x-2 space-x-reverse">
+            {feedbackMessage.type === 'success' ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            ) : (
+              <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+            )}
+            <span>{feedbackMessage.text}</span>
           </div>
           <button
-            onClick={handleToggleEmergencyPower}
-            className="px-3.5 py-1.5 rounded-xl bg-white text-rose-700 hover:bg-rose-50 text-xs font-black shadow-xs transition flex items-center justify-center gap-1.5 shrink-0 active:scale-95 cursor-pointer"
+            onClick={() => setFeedbackMessage(null)}
+            className="text-slate-400 hover:text-slate-600 p-0.5"
           >
-            <Power className="w-3.5 h-3.5 text-emerald-600" />
-            <span>روشن‌سازی مجدد سامانه</span>
+            <X className="w-3.5 h-3.5" />
           </button>
         </div>
       )}
 
-      {/* Card Header */}
-      <div className="p-5 sm:p-6 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+      {/* Header Section */}
+      <div id="queue-header-row" className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 pb-4 border-b border-slate-100">
         <div className="flex items-center space-x-3 space-x-reverse">
-          <div className="w-12 h-12 rounded-2xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600 shadow-xs">
-            <Clock className="w-6 h-6" />
+          <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border ${
+            isQueueActive
+              ? 'bg-blue-50 text-blue-600 border-blue-200'
+              : 'bg-amber-50 text-amber-700 border-amber-200'
+          }`}>
+            <Layers className="w-5 h-5" />
           </div>
           <div>
-            <div className="flex items-center gap-2 flex-wrap">
-              <h2 className="text-lg font-black text-slate-800">
-                مدیریت صف پیام‌ها و زمان‌بندی هوشمند
-              </h2>
-              {stats.isEmergencyHalted ? (
-                <span className="px-2 py-0.5 rounded-md text-xs font-bold bg-rose-100 text-rose-800 border border-rose-200">
-                  خاموش اضطراری
-                </span>
-              ) : stats.isQueuePaused ? (
-                <span className="px-2 py-0.5 rounded-md text-xs font-bold bg-amber-100 text-amber-800 border border-amber-200">
-                  صف موقتاً متوقف
-                </span>
+            <div className="flex items-center space-x-2 space-x-reverse flex-wrap gap-y-1">
+              <h2 className="text-base font-bold text-slate-800">مدیریت صف ارسال پیام‌ها</h2>
+              {/* Status Badges */}
+              {isQueueActive ? (
+                stats.isQueuePaused ? (
+                  <span className="bg-amber-100 text-amber-800 text-[10px] font-bold px-2 py-0.5 rounded-full border border-amber-200 flex items-center gap-1">
+                    <Pause className="w-3 h-3" />
+                    صف متوقف
+                  </span>
+                ) : (
+                  <span className="bg-emerald-50 text-emerald-700 text-[10px] font-bold px-2 py-0.5 rounded-full border border-emerald-200 flex items-center gap-1">
+                    <ShieldCheck className="w-3 h-3 text-emerald-600" />
+                    صف فعال (ضد اسپم تلگرام)
+                  </span>
+                )
               ) : (
-                <span className="px-2 py-0.5 rounded-md text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-200 flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-600 animate-pulse"></span>
-                  صف فعال و هوشمند
+                <span className="bg-amber-50 text-amber-700 text-[10px] font-bold px-2 py-0.5 rounded-full border border-amber-200 flex items-center gap-1">
+                  <Zap className="w-3 h-3 text-amber-600" />
+                  صف غیرفعال (ارسال مستقیم و آنی)
+                </span>
+              )}
+
+              {/* Night mode state indicator */}
+              {!settings.silentHoursEnabled && (
+                <span className="bg-sky-50 text-sky-700 text-[10px] font-medium px-2 py-0.5 rounded-full border border-sky-200 flex items-center gap-1" title="تایم شب خاموش است و پیام‌ها به فردا صبح موکول نمی‌شوند">
+                  <CalendarCheck className="w-3 h-3 text-sky-600" />
+                  تایم شب: غیرفعال
                 </span>
               )}
             </div>
             <p className="text-xs text-slate-500 mt-0.5">
-              جلوگیری از بلاک شدن با تاخیر تصادفی و جیتر، رعایت ساعات سکوت شبانه، کنترل سقف نرخ و ارسال تک‌نخی
+              تنظیم تاخیر تصادفی، زمان‌بندی هوشمند و ارسال مطمئن بدون قطعی یا مسدودی اکانت
             </p>
           </div>
         </div>
 
-        {/* Action Controls Bar */}
-        <div className="flex items-center flex-wrap gap-2">
+        {/* Header Action Buttons */}
+        <div id="queue-header-actions" className="flex items-center space-x-2 space-x-reverse shrink-0 flex-wrap gap-y-1.5">
+          {/* Master 1-Click Toggle: Disable / Enable Queue */}
           <button
-            onClick={() => setShowArchitectureGuide(!showArchitectureGuide)}
-            className={`px-3 py-2 text-xs font-bold rounded-xl border transition flex items-center gap-1.5 ${
-              showArchitectureGuide
-                ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
-                : 'bg-slate-50 text-slate-600 hover:bg-slate-100 border-slate-200'
+            id="queue-master-toggle-btn"
+            onClick={handleToggleQueueMaster}
+            disabled={isTogglingMaster}
+            className={`flex items-center space-x-1.5 space-x-reverse px-3 py-1.5 rounded-xl text-xs font-bold transition shadow-sm border ${
+              isQueueActive
+                ? 'bg-rose-50 hover:bg-rose-100 text-rose-700 border-rose-200'
+                : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border-emerald-200'
             }`}
-            title="راهنمای نحوه کارکرد صف هوشمند"
+            title={isQueueActive ? 'کلیک برای غیرفعال‌سازی صف و ارسال فوری پیام‌ها' : 'کلیک برای فعال‌سازی صف ارسال و تاخیر امن'}
           >
-            <Info className="w-3.5 h-3.5 text-indigo-600" />
-            <span>راهنمای عملکرد</span>
-          </button>
-
-          <button
-            onClick={fetchQueueData}
-            disabled={isLoading}
-            className="p-2 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-xl transition border border-slate-200"
-            title="تازه سازی وضعیت صف"
-          >
-            <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
-          </button>
-
-          <button
-            onClick={() => setShowSettingsDrawer(!showSettingsDrawer)}
-            className={`px-3 py-2 text-xs font-bold rounded-xl border transition flex items-center gap-1.5 ${
-              showSettingsDrawer
-                ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
-                : 'text-slate-700 bg-slate-50 hover:bg-slate-100 border-slate-200'
-            }`}
-          >
-            <Sliders className={`w-3.5 h-3.5 ${showSettingsDrawer ? 'text-white' : 'text-indigo-600'}`} />
-            <span>پیکربندی تاخیر و نرخ</span>
-            {showSettingsDrawer ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-          </button>
-
-          <button
-            onClick={handleToggleEmergencyPower}
-            className={`px-3.5 py-2 rounded-xl text-xs font-black transition shadow-xs flex items-center gap-1.5 active:scale-95 cursor-pointer ${
-              stats.isEmergencyHalted
-                ? 'bg-emerald-600 hover:bg-emerald-500 text-white ring-2 ring-emerald-300'
-                : 'bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200'
-            }`}
-            title="کلید قطع برق اضطراری کل سامانه (توقف کامل رصد کانال‌ها و صف ارسال)"
-          >
-            <Power className="w-3.5 h-3.5" />
-            <span>{stats.isEmergencyHalted ? 'روشن کردن سیستم' : 'خاموش اضطراری'}</span>
-          </button>
-
-          <button
-            onClick={handleTogglePause}
-            className={`px-3.5 py-2 rounded-xl text-xs font-black transition shadow-xs flex items-center gap-1.5 ${
-              stats.isQueuePaused
-                ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-500/20'
-                : 'bg-amber-600 hover:bg-amber-500 text-white shadow-amber-500/20'
-            }`}
-          >
-            {stats.isQueuePaused ? (
+            {isQueueActive ? (
               <>
-                <Play className="w-3.5 h-3.5 fill-current" />
-                <span>از سرگیری صف</span>
+                <Power className="w-3.5 h-3.5 text-rose-600" />
+                <span>غیرفعال کردن صف</span>
               </>
             ) : (
               <>
-                <Pause className="w-3.5 h-3.5 fill-current" />
-                <span>توقف موقت صف</span>
+                <Zap className="w-3.5 h-3.5 text-emerald-600" />
+                <span>فعال کردن صف</span>
               </>
             )}
           </button>
 
-          {stats.totalQueued > 0 && (
+          {/* Pause / Resume Button (when queue is enabled) */}
+          {isQueueActive && (
             <button
-              onClick={() => setConfirmClearAllModal(true)}
-              className="px-3 py-2 text-xs font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-xl transition flex items-center gap-1"
-              title="تخلیه کامل پیام‌های در صف"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-              <span>تخلیه صف ({stats.totalQueued})</span>
-            </button>
-          )}
-
-          {stats.failedCount > 0 && (
-            <div className="flex items-center gap-1.5">
-              <button
-                onClick={handleRetryFailed}
-                className="px-3 py-2 text-xs font-bold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-xl transition flex items-center gap-1.5"
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
-                <span>تلاش مجدد ({stats.failedCount})</span>
-              </button>
-              <button
-                onClick={handleClearFailed}
-                className="p-2 text-xs font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-xl transition"
-                title="پاک‌سازی خطادارها"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Interactive Visual Pipeline Infographic Banner */}
-      {showArchitectureGuide && (
-        <div className="p-5 bg-gradient-to-r from-indigo-50/70 via-slate-50 to-purple-50/70 border-b border-indigo-100/70">
-          <div className="flex items-center justify-between mb-3">
-            <h4 className="text-xs font-black text-indigo-900 flex items-center gap-1.5">
-              <Sparkles className="w-4 h-4 text-indigo-600" />
-              <span>معماری و چرخه ارسال هوشمند پیام‌ها:</span>
-            </h4>
-            <span className="text-2xs text-slate-500">حفاظت چندلایه از اکانت در برابر قوانین تلگرام</span>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-5 gap-2 text-center text-xs">
-            <div className="p-3 bg-white rounded-xl border border-slate-200/80 shadow-2xs">
-              <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 font-bold flex items-center justify-center mx-auto mb-1 text-2xs">۱</span>
-              <strong className="block text-slate-800 text-2xs">دریافت از مبدأ</strong>
-              <p className="text-3xs text-slate-500 mt-0.5">شنود مداوم کانال‌ها و استخراج محتوا</p>
-            </div>
-            <div className="p-3 bg-white rounded-xl border border-slate-200/80 shadow-2xs">
-              <span className="w-6 h-6 rounded-full bg-amber-100 text-amber-700 font-bold flex items-center justify-center mx-auto mb-1 text-2xs">۲</span>
-              <strong className="block text-slate-800 text-2xs">فیلتر و پاک‌سازی</strong>
-              <p className="text-3xs text-slate-500 mt-0.5">حذف لینک‌ها، ایدی‌ها و کلمات ممنوعه</p>
-            </div>
-            <div className="p-3 bg-white rounded-xl border border-slate-200/80 shadow-2xs">
-              <span className="w-6 h-6 rounded-full bg-purple-100 text-purple-700 font-bold flex items-center justify-center mx-auto mb-1 text-2xs">۳</span>
-              <strong className="block text-slate-800 text-2xs">محاسبه تاخیر و جیتر</strong>
-              <p className="text-3xs text-slate-500 mt-0.5">ایجاد وقفه تصادفی جهت شبیه‌سازی رفتار انسان</p>
-            </div>
-            <div className="p-3 bg-white rounded-xl border border-slate-200/80 shadow-2xs">
-              <span className="w-6 h-6 rounded-full bg-indigo-100 text-indigo-700 font-bold flex items-center justify-center mx-auto mb-1 text-2xs">۴</span>
-              <strong className="block text-slate-800 text-2xs">بررسی ساعات سکوت</strong>
-              <p className="text-3xs text-slate-500 mt-0.5">رزرو پیام‌های شبانه برای اول صبح بدون ریزش</p>
-            </div>
-            <div className="p-3 bg-white rounded-xl border border-slate-200/80 shadow-2xs">
-              <span className="w-6 h-6 rounded-full bg-emerald-100 text-emerald-700 font-bold flex items-center justify-center mx-auto mb-1 text-2xs">۵</span>
-              <strong className="block text-slate-800 text-2xs">ارسال ایمن به مقصد</strong>
-              <p className="text-3xs text-slate-500 mt-0.5">تحویل تک‌نخی با فواصل مطمئن به مقصد</p>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Feedback Toast */}
-      {feedbackMessage && (
-        <div
-          className={`mx-6 mt-4 p-3.5 rounded-2xl text-xs font-bold flex items-center gap-2 ${
-            feedbackMessage.type === 'success'
-              ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
-              : 'bg-rose-50 text-rose-800 border border-rose-200'
-          }`}
-        >
-          {feedbackMessage.type === 'success' ? (
-            <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600" />
-          ) : (
-            <AlertTriangle className="w-4 h-4 shrink-0 text-rose-600" />
-          )}
-          <span>{feedbackMessage.text}</span>
-        </div>
-      )}
-
-      {/* Telegram FloodWait Warning Banner */}
-      {stats.floodWaitActiveUntil && (
-        <div className="mx-6 mt-4 p-3.5 rounded-2xl bg-amber-50 border border-amber-200 text-amber-900 text-xs font-medium flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-            <span>
-              <strong>وقوع FloodWait تلگرام:</strong> به دلیل ارسال‌های قبلی، تلگرام وقفه اعلام کرده است. ارسال پیام‌ها تا{' '}
-              <code className="font-bold">{new Date(stats.floodWaitActiveUntil).toLocaleTimeString('fa-IR')}</code> متوقف می‌ماند و سپس به صورت کاملاً خودکار بدون از دست رفتن هیچ پیامی از سر گرفته خواهد شد.
-            </span>
-          </div>
-          <span className="px-2 py-0.5 rounded-md bg-amber-200/80 text-amber-900 text-2xs font-bold">
-            محافظت هوشمند
-          </span>
-        </div>
-      )}
-
-      {/* Settings Panel Drawer */}
-      {showSettingsDrawer && (
-        <form onSubmit={handleSaveSettings} className="p-5 bg-slate-50 border-b border-slate-200 space-y-5">
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-            <div>
-              <h3 className="text-sm font-black text-slate-800 flex items-center gap-1.5">
-                <Sliders className="w-4 h-4 text-indigo-600" />
-                <span>پیکربندی هوشمند تاخیر، جیتر و ساعات سکوت</span>
-              </h3>
-              <p className="text-2xs text-slate-500 mt-0.5">
-                تنظیمات به محض ذخیره در دیتابیس پایدار ذخیره شده و روی تمام پیام‌های جدید اعمال می‌شوند.
-              </p>
-            </div>
-
-            {/* Quick Presets */}
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <span className="text-2xs font-bold text-slate-500">پروفایل‌های پیشنهادی:</span>
-              <button
-                type="button"
-                onClick={() => handleApplyPreset('safe')}
-                className="px-2.5 py-1 rounded-lg text-2xs font-bold bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 transition"
-              >
-                🛡️ امن (ضدبلاک)
-              </button>
-              <button
-                type="button"
-                onClick={() => handleApplyPreset('standard')}
-                className="px-2.5 py-1 rounded-lg text-2xs font-bold bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 transition"
-              >
-                ⚖️ استاندارد
-              </button>
-              <button
-                type="button"
-                onClick={() => handleApplyPreset('fast')}
-                className="px-2.5 py-1 rounded-lg text-2xs font-bold bg-amber-50 text-amber-700 hover:bg-amber-100 border border-amber-200 transition"
-              >
-                ⚡ سریع
-              </button>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {/* Min Delay */}
-            <div className="bg-white p-3.5 rounded-2xl border border-slate-200/80 shadow-2xs space-y-1.5">
-              <label className="text-xs font-bold text-slate-700 flex items-center justify-between">
-                <span>حداقل تاخیر</span>
-                <span className="text-2xs font-mono text-indigo-600">{settings.minDelaySeconds} ثانیه</span>
-              </label>
-              <input
-                type="number"
-                min="1"
-                max="300"
-                value={settings.minDelaySeconds}
-                onChange={e => setSettings({ ...settings, minDelaySeconds: Number(e.target.value) })}
-                className="w-full px-3 py-2 text-xs rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 font-mono font-bold"
-              />
-              <span className="text-3xs text-slate-400 block">حداقل زمان انتظار پیام قبل از ارسال</span>
-            </div>
-
-            {/* Max Delay */}
-            <div className="bg-white p-3.5 rounded-2xl border border-slate-200/80 shadow-2xs space-y-1.5">
-              <label className="text-xs font-bold text-slate-700 flex items-center justify-between">
-                <span>حداکثر تاخیر (جیتر تصادفی)</span>
-                <span className="text-2xs font-mono text-indigo-600">{settings.maxDelaySeconds} ثانیه</span>
-              </label>
-              <input
-                type="number"
-                min="1"
-                max="600"
-                value={settings.maxDelaySeconds}
-                onChange={e => setSettings({ ...settings, maxDelaySeconds: Number(e.target.value) })}
-                className="w-full px-3 py-2 text-xs rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 font-mono font-bold"
-              />
-              <span className="text-3xs text-slate-400 block">تاخیر تصادفی بین حداقل و حداکثر برای فریب الگوریتم اسپم</span>
-            </div>
-
-            {/* Min Interval */}
-            <div className="bg-white p-3.5 rounded-2xl border border-slate-200/80 shadow-2xs space-y-1.5">
-              <label className="text-xs font-bold text-slate-700 flex items-center justify-between">
-                <span>فاصله امن بین هر ۲ ارسال</span>
-                <span className="text-2xs font-mono text-indigo-600">{settings.minIntervalSeconds} ثانیه</span>
-              </label>
-              <input
-                type="number"
-                min="1"
-                max="60"
-                value={settings.minIntervalSeconds}
-                onChange={e => setSettings({ ...settings, minIntervalSeconds: Number(e.target.value) })}
-                className="w-full px-3 py-2 text-xs rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 font-mono font-bold"
-              />
-              <span className="text-3xs text-slate-400 block">جلوگیری قطعی از ارسال رگباری و چندتایی</span>
-            </div>
-
-            {/* Max Per Min */}
-            <div className="bg-white p-3.5 rounded-2xl border border-slate-200/80 shadow-2xs space-y-1.5">
-              <label className="text-xs font-bold text-slate-700 flex items-center justify-between">
-                <span>سقف مجاز ارسال در دقیقه</span>
-                <span className="text-2xs font-mono text-indigo-600">{settings.maxMessagesPerMinute} پیام</span>
-              </label>
-              <input
-                type="number"
-                min="1"
-                max="60"
-                value={settings.maxMessagesPerMinute}
-                onChange={e => setSettings({ ...settings, maxMessagesPerMinute: Number(e.target.value) })}
-                className="w-full px-3 py-2 text-xs rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 font-mono font-bold"
-              />
-              <span className="text-3xs text-slate-400 block">توقف خودکار در صورت عبور از سقف در دقیقه</span>
-            </div>
-          </div>
-
-          {/* Silent Hours Section */}
-          <div className="p-4 bg-white rounded-2xl border border-slate-200/80 shadow-2xs space-y-3">
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-              <div className="flex items-center space-x-3 space-x-reverse">
-                <input
-                  type="checkbox"
-                  id="silentHoursToggle"
-                  checked={settings.silentHoursEnabled}
-                  onChange={e => setSettings({ ...settings, silentHoursEnabled: e.target.checked })}
-                  className="w-4 h-4 rounded-md text-indigo-600 focus:ring-indigo-500 border-slate-300 cursor-pointer"
-                />
-                <label htmlFor="silentHoursToggle" className="text-xs font-bold text-slate-800 cursor-pointer flex items-center gap-1.5">
-                  <Moon className="w-4 h-4 text-indigo-600" />
-                  <span>فعال‌سازی ساعات سکوت شبانه (Silent Hours)</span>
-                </label>
-              </div>
-
-              <div className="flex items-center space-x-2 space-x-reverse">
-                <span className="text-xs font-medium text-slate-600">شروع:</span>
-                <input
-                  type="time"
-                  disabled={!settings.silentHoursEnabled}
-                  value={settings.silentHoursStart}
-                  onChange={e => setSettings({ ...settings, silentHoursStart: e.target.value })}
-                  className="px-2.5 py-1.5 text-xs rounded-xl border border-slate-200 bg-slate-50 font-mono font-bold disabled:opacity-40"
-                />
-                <span className="text-xs font-medium text-slate-600">پایان:</span>
-                <input
-                  type="time"
-                  disabled={!settings.silentHoursEnabled}
-                  value={settings.silentHoursEnd}
-                  onChange={e => setSettings({ ...settings, silentHoursEnd: e.target.value })}
-                  className="px-2.5 py-1.5 text-xs rounded-xl border border-slate-200 bg-slate-50 font-mono font-bold disabled:opacity-40"
-                />
-                <span className="text-2xs text-slate-400 font-medium">(تهران +03:30)</span>
-              </div>
-            </div>
-            <p className="text-2xs text-slate-500 bg-slate-50 p-2.5 rounded-xl border border-slate-100">
-              💡 <strong>نحوه کار ساعات سکوت:</strong> پیام‌هایی که در این بازه از کانال‌های مبدا منتشر شوند هرگز دور ریخته نمی‌شوند؛ بلکه سیستم آنها را ذخیره کرده و ساعت ارسالشان را به پایان زمان سکوت (مثلاً ساعت 07:00 صبح) موکول می‌نماید تا اعضای کانال در خواب آزرده نشوند.
-            </p>
-          </div>
-
-          <div className="flex items-center justify-between pt-2">
-            <button
-              type="button"
-              onClick={() => setShowSettingsDrawer(false)}
-              className="px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-200/60 rounded-xl transition"
-            >
-              انصراف
-            </button>
-            <button
-              type="submit"
-              disabled={isSavingSettings}
-              className="px-6 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-black shadow-xs transition"
-            >
-              {isSavingSettings ? 'در حال ذخیره‌سازی...' : 'ذخیره تنظیمات صف'}
-            </button>
-          </div>
-        </form>
-      )}
-
-      {/* Modern High-Scannable 6-Metric Grid */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 divide-x divide-x-reverse divide-slate-100 border-b border-slate-100 bg-slate-50/40">
-        {/* Total In Queue */}
-        <div className="p-4 text-center">
-          <span className="text-2xs font-bold text-slate-500 block mb-1">کل پیام‌های صف</span>
-          <span className="text-xl font-black text-slate-800">
-            {stats.totalQueued.toLocaleString('fa-IR')}
-          </span>
-          <span className="text-3xs text-slate-400 block mt-0.5 font-medium">
-            {stats.isQueuePaused ? 'متوقف‌شده' : 'در گردش فعال'}
-          </span>
-        </div>
-
-        {/* Scheduled / Waiting */}
-        <div className="p-4 text-center">
-          <span className="text-2xs font-bold text-amber-600 block mb-1">در انتظار زمان‌بندی</span>
-          <span className="text-xl font-black text-amber-600">
-            {stats.scheduledCount.toLocaleString('fa-IR')}
-          </span>
-          <span className="text-3xs text-slate-400 block mt-0.5 truncate">
-            {stats.nextScheduledItemTime ? formatScheduledTime(stats.nextScheduledItemTime) : 'موردی نیست'}
-          </span>
-        </div>
-
-        {/* Sending Now */}
-        <div className="p-4 text-center">
-          <span className="text-2xs font-bold text-blue-600 block mb-1">در حال ارسال</span>
-          <span className="text-xl font-black text-blue-600">
-            {stats.sendingCount.toLocaleString('fa-IR')}
-          </span>
-          <span className="text-3xs text-blue-500 block mt-0.5">
-            تک‌نخی (Concurrency: 1)
-          </span>
-        </div>
-
-        {/* Sent Successfully */}
-        <div className="p-4 text-center">
-          <span className="text-2xs font-bold text-emerald-600 block mb-1">ارسال‌شده (Sent)</span>
-          <span className="text-xl font-black text-emerald-600">
-            {stats.sentCount.toLocaleString('fa-IR')}
-          </span>
-          <span className="text-3xs text-emerald-600/70 block mt-0.5 font-medium">
-            موفق در کانال مقصد
-          </span>
-        </div>
-
-        {/* Failed */}
-        <div className="p-4 text-center">
-          <span className="text-2xs font-bold text-rose-600 block mb-1">ناموفق (Failed)</span>
-          <span className="text-xl font-black text-rose-600">
-            {stats.failedCount.toLocaleString('fa-IR')}
-          </span>
-          <span className="text-3xs text-rose-500 block mt-0.5 font-medium">
-            {stats.failedCount > 0 ? 'نیاز به بررسی' : 'بدون خطا'}
-          </span>
-        </div>
-
-        {/* Current Rate */}
-        <div className="p-4 text-center">
-          <span className="text-2xs font-bold text-indigo-600 block mb-1">نرخ ارسال زنده</span>
-          <span className="text-xl font-black text-indigo-700">
-            {stats.currentRatePerMinute}
-          </span>
-          <span className="text-3xs text-slate-400 block mt-0.5 font-medium">
-            پیام / دقیقه (سقف: {settings.maxMessagesPerMinute})
-          </span>
-        </div>
-      </div>
-
-      {/* Filter Tabs & Quick Search */}
-      <div className="px-5 py-3 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 bg-white">
-        <div className="flex items-center space-x-1 space-x-reverse text-xs overflow-x-auto no-scrollbar">
-          {[
-            { key: 'all', label: 'همه', count: items.length },
-            { key: 'scheduled', label: 'زمان‌بندی‌شده', count: stats.scheduledCount },
-            { key: 'sending', label: 'در حال ارسال', count: stats.sendingCount },
-            { key: 'sent', label: 'ارسال‌شده', count: stats.sentCount },
-            { key: 'failed', label: 'خطادار', count: stats.failedCount },
-          ].map(f => (
-            <button
-              key={f.key}
-              onClick={() => setStatusFilter(f.key)}
-              className={`px-3 py-1.5 rounded-xl font-bold transition flex items-center gap-1.5 shrink-0 ${
-                statusFilter === f.key
-                  ? 'bg-indigo-600 text-white shadow-xs'
-                  : 'text-slate-600 hover:bg-slate-100'
+              id="queue-pause-resume-btn"
+              onClick={handleTogglePause}
+              className={`flex items-center space-x-1 space-x-reverse px-2.5 py-1.5 rounded-xl text-xs font-medium transition border ${
+                stats.isQueuePaused
+                  ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border-emerald-200'
+                  : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200'
               }`}
             >
-              <span>{f.label}</span>
-              <span
-                className={`px-1.5 py-0.2 rounded-full text-2xs font-mono font-bold ${
-                  statusFilter === f.key ? 'bg-white/20 text-white' : 'bg-slate-200 text-slate-700'
-                }`}
-              >
-                {f.count}
-              </span>
-            </button>
-          ))}
-        </div>
-
-        {/* Search Field */}
-        <div className="relative w-full sm:w-64">
-          <Search className="w-3.5 h-3.5 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-          <input
-            type="text"
-            placeholder="جستجو در متن یا شناسه..."
-            value={searchQuery}
-            onChange={e => setSearchQuery(e.target.value)}
-            className="w-full pr-8 pl-3 py-1.5 text-xs rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20"
-          />
-          {searchQuery && (
-            <button
-              onClick={() => setSearchQuery('')}
-              className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
-            >
-              <X className="w-3 h-3" />
+              {stats.isQueuePaused ? (
+                <>
+                  <Play className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>ادامه ارسال</span>
+                </>
+              ) : (
+                <>
+                  <Pause className="w-3.5 h-3.5 text-slate-500" />
+                  <span>توقف موقت</span>
+                </>
+              )}
             </button>
           )}
+
+          {/* Refresh Button */}
+          <button
+            id="queue-refresh-btn"
+            onClick={fetchQueueData}
+            className="p-2 bg-slate-50 hover:bg-slate-100 text-slate-600 rounded-xl border border-slate-200 transition"
+            title="به‌روزرسانی آمار و پیام‌ها"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
+          </button>
         </div>
       </div>
 
-      {/* Queue Items Table */}
-      <div className="overflow-x-auto">
-        {filteredItems.length === 0 ? (
-          <div className="p-12 text-center text-slate-400 space-y-3">
-            <div className="w-12 h-12 rounded-2xl bg-slate-50 border border-slate-100 flex items-center justify-center mx-auto text-slate-300">
-              <Clock className="w-6 h-6 stroke-1" />
-            </div>
-            <div>
-              <p className="text-xs font-bold text-slate-600">هیچ پیامی در این وضعیت صف وجود ندارد.</p>
-              <p className="text-2xs text-slate-400 mt-0.5">
-                {searchQuery ? 'جستجو با این عبارت نتیجه‌ای در بر نداشت.' : 'پیام‌های جدید دریافتی از کانال‌های مبدا در اینجا لیست خواهند شد.'}
-              </p>
-            </div>
+      {/* Night Schedule Bugfix Banner & Instant Release Button */}
+      {(!settings.silentHoursEnabled || (stats.scheduledCount > 0)) && (
+        <div id="queue-night-mode-banner" className="mt-3 p-2.5 bg-sky-50/70 border border-sky-200/80 rounded-xl flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-xs text-sky-900">
+          <div className="flex items-center space-x-2 space-x-reverse">
+            <Moon className="w-4 h-4 text-sky-600 shrink-0" />
+            <span>
+              {!settings.silentHoursEnabled
+                ? 'زمان‌بندی تایم شب خاموش است. کلیه پیام‌ها بدون موکول‌شدن به فردا ارسال خواهند شد.'
+                : `تایم شب فعال است (${settings.silentHoursStart} تا ${settings.silentHoursEnd}).`}
+            </span>
           </div>
-        ) : (
-          <table className="w-full text-right text-xs">
-            <thead>
-              <tr className="bg-slate-50/70 border-b border-slate-100 text-slate-500 font-bold">
-                <th className="py-3 px-4">شناسه</th>
-                <th className="py-3 px-4">کانال مبدأ</th>
-                <th className="py-3 px-4">محتوا / رسانه</th>
-                <th className="py-3 px-4">زمان ارسال هدف</th>
-                <th className="py-3 px-4">وضعیت</th>
-                <th className="py-3 px-4">تلاش‌ها و خطا</th>
-                <th className="py-3 px-4 text-left">عملیات</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {filteredItems.map(item => (
-                <tr key={item.id} className="hover:bg-slate-50/70 transition">
-                  {/* Message ID */}
-                  <td className="py-3 px-4 font-mono text-2xs text-slate-500 font-bold">
-                    #{item.originalMessageId}
-                  </td>
 
-                  {/* Source Channel */}
-                  <td className="py-3 px-4">
-                    <span className="font-bold text-slate-800 block truncate max-w-[180px]">
-                      {item.sourceChannelTitle || item.sourceChannelUsername || item.sourceChannelId}
-                    </span>
-                    {item.sourceChannelUsername && (
-                      <span className="text-2xs text-slate-400 font-mono block mt-0.5">
-                        @{item.sourceChannelUsername}
-                      </span>
-                    )}
-                  </td>
+          <button
+            id="queue-release-night-btn"
+            onClick={handleReleaseNightMessages}
+            disabled={isReleasingNight}
+            className="flex items-center space-x-1 space-x-reverse px-2.5 py-1 bg-white hover:bg-sky-100 text-sky-800 border border-sky-300 rounded-lg text-xs font-semibold transition shrink-0 self-start sm:self-auto shadow-xs"
+            title="اگر پیامی به فردا صبح موکول شده باشد با این دکمه بلافاصله در صف جاری قرار می‌گیرد"
+          >
+            <ArrowRightLeft className="w-3 h-3 text-sky-600" />
+            <span>{isReleasingNight ? 'در حال آزادسازی...' : 'آزادسازی پیام‌های معلق'}</span>
+          </button>
+        </div>
+      )}
 
-                  {/* Content & Media Badge */}
-                  <td className="py-3 px-4">
-                    <div className="flex items-center gap-1.5">
-                      <span className="p-1 rounded-md bg-slate-100 text-slate-600 shrink-0">
-                        {getMediaIcon(item.mediaType)}
-                      </span>
-                      <span className="text-2xs text-slate-700 font-medium truncate max-w-[200px]">
-                        {item.messageText || item.formattedText || item.mediaMetadata?.caption || `[فایل ${item.mediaType || 'چندرسانه‌ای'}]`}
-                      </span>
-                    </div>
-                  </td>
+      {/* Minimalist 4 Stat Cards (Click to open respective collapsible drawer) */}
+      <div id="queue-stat-cards-grid" className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-3 mt-4">
+        {/* Card 1: Scheduled / Pending */}
+        <button
+          id="queue-tab-scheduled-btn"
+          onClick={() => toggleTab('scheduled')}
+          className={`p-3 rounded-xl border text-right transition-all flex flex-col justify-between ${
+            activeTab === 'scheduled'
+              ? 'bg-blue-50/80 border-blue-400 ring-2 ring-blue-400/20 shadow-xs'
+              : 'bg-slate-50/70 border-slate-200/80 hover:border-slate-300 hover:bg-slate-100/60'
+          }`}
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-slate-600 font-medium">در صف انتظار</span>
+            <Clock className={`w-4 h-4 ${activeTab === 'scheduled' ? 'text-blue-600' : 'text-slate-400'}`} />
+          </div>
+          <div className="mt-2 flex items-baseline justify-between">
+            <span className="text-xl font-extrabold text-slate-800 font-mono">
+              {stats.scheduledCount + stats.pendingCount}
+            </span>
+            <span className="text-[11px] text-blue-600 font-medium flex items-center gap-0.5">
+              {activeTab === 'scheduled' ? 'بستن کشو' : 'مشاهده پیام‌ها'}
+              {activeTab === 'scheduled' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+            </span>
+          </div>
+        </button>
 
-                  {/* Scheduled Target Time */}
-                  <td className="py-3 px-4 text-slate-600 font-medium">
-                    <div className="flex items-center gap-1">
-                      <span className="font-bold text-indigo-700">{formatScheduledTime(item.scheduledTime)}</span>
-                    </div>
-                    <span className="block text-2xs text-slate-400 font-mono mt-0.5">
-                      {new Date(item.scheduledTime).toLocaleTimeString('fa-IR', {
-                        hour: '2-digit',
-                        minute: '2-digit',
-                        second: '2-digit',
-                      })}
-                    </span>
-                  </td>
+        {/* Card 2: Sending (Real-time count) */}
+        <div
+          id="queue-card-sending"
+          className="p-3 rounded-xl border border-slate-200/80 bg-slate-50/70 text-right flex flex-col justify-between"
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-slate-600 font-medium">در حال ارسال</span>
+            <Send className="w-4 h-4 text-emerald-500 animate-pulse" />
+          </div>
+          <div className="mt-2 flex items-baseline justify-between">
+            <span className="text-xl font-extrabold text-emerald-700 font-mono">
+              {stats.sendingCount}
+            </span>
+            <span className="text-[10px] text-slate-400 font-mono">
+              {stats.currentRatePerMinute} پیام/دقیقه
+            </span>
+          </div>
+        </div>
 
-                  {/* Status Badge */}
-                  <td className="py-3 px-4">
-                    {getStatusBadge(item.status)}
-                  </td>
+        {/* Card 3: Sent (Successful) */}
+        <button
+          id="queue-tab-sent-btn"
+          onClick={() => toggleTab('sent')}
+          className={`p-3 rounded-xl border text-right transition-all flex flex-col justify-between ${
+            activeTab === 'sent'
+              ? 'bg-emerald-50/80 border-emerald-400 ring-2 ring-emerald-400/20 shadow-xs'
+              : 'bg-slate-50/70 border-slate-200/80 hover:border-slate-300 hover:bg-slate-100/60'
+          }`}
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-slate-600 font-medium">ارسال‌های موفق</span>
+            <CheckCircle2 className={`w-4 h-4 ${activeTab === 'sent' ? 'text-emerald-600' : 'text-slate-400'}`} />
+          </div>
+          <div className="mt-2 flex items-baseline justify-between">
+            <span className="text-xl font-extrabold text-slate-800 font-mono">
+              {stats.sentCount}
+            </span>
+            <span className="text-[11px] text-emerald-700 font-medium flex items-center gap-0.5">
+              {activeTab === 'sent' ? 'بستن کشو' : 'مشاهده موفق‌ها'}
+              {activeTab === 'sent' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+            </span>
+          </div>
+        </button>
 
-                  {/* Attempts & Last Error */}
-                  <td className="py-3 px-4">
-                    <span className="text-2xs font-mono text-slate-500 block">
-                      تلاش: {item.attemptsCount}
-                    </span>
-                    {item.lastError && (
-                      <span className="text-2xs text-rose-600 font-medium block max-w-xs truncate mt-0.5" title={item.lastError}>
-                        {item.lastError}
-                      </span>
-                    )}
-                  </td>
+        {/* Card 4: Failed (Errors) */}
+        <button
+          id="queue-tab-failed-btn"
+          onClick={() => toggleTab('failed')}
+          className={`p-3 rounded-xl border text-right transition-all flex flex-col justify-between ${
+            activeTab === 'failed'
+              ? 'bg-rose-50/80 border-rose-400 ring-2 ring-rose-400/20 shadow-xs'
+              : 'bg-slate-50/70 border-slate-200/80 hover:border-slate-300 hover:bg-slate-100/60'
+          }`}
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-slate-600 font-medium">ناموفق / خطا</span>
+            <AlertTriangle className={`w-4 h-4 ${activeTab === 'failed' ? 'text-rose-600' : 'text-slate-400'}`} />
+          </div>
+          <div className="mt-2 flex items-baseline justify-between">
+            <span className={`text-xl font-extrabold font-mono ${stats.failedCount > 0 ? 'text-rose-600' : 'text-slate-800'}`}>
+              {stats.failedCount}
+            </span>
+            <span className="text-[11px] text-rose-700 font-medium flex items-center gap-0.5">
+              {activeTab === 'failed' ? 'بستن کشو' : 'مشاهده خطاها'}
+              {activeTab === 'failed' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+            </span>
+          </div>
+        </button>
+      </div>
 
-                  {/* Actions */}
-                  <td className="py-3 px-4 text-left">
-                    <div className="flex items-center justify-end gap-1">
-                      {/* Preview Content */}
-                      <button
-                        onClick={() => setPreviewItem(item)}
-                        className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition"
-                        title="مشاهده جزئیات پیام"
-                      >
-                        <Eye className="w-3.5 h-3.5" />
-                      </button>
+      {/* Settings Tab Toggle Row */}
+      <div className="mt-3 flex items-center justify-between pt-2 border-t border-slate-100">
+        <div className="text-xs text-slate-500">
+          {stats.nextScheduledItemTime && (
+            <span>ارسال پیام بعدی: <strong className="text-slate-700 font-mono">{formatTehranTime(stats.nextScheduledItemTime)}</strong></span>
+          )}
+        </div>
 
-                      {/* Instant Send for Scheduled items */}
-                      {item.status === 'scheduled' && (
+        <button
+          id="queue-tab-settings-btn"
+          onClick={() => toggleTab('settings')}
+          className={`flex items-center space-x-1.5 space-x-reverse px-3 py-1.5 rounded-xl text-xs font-medium transition border ${
+            activeTab === 'settings'
+              ? 'bg-indigo-50 text-indigo-700 border-indigo-300 ring-2 ring-indigo-400/20'
+              : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200'
+          }`}
+        >
+          <Sliders className="w-3.5 h-3.5" />
+          <span>تنظیمات تاخیر و ساعات سکوت</span>
+          {activeTab === 'settings' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+        </button>
+      </div>
+
+      {/* ========================================================================= */}
+      {/* COLLAPSIBLE SECTION: Rendered strictly on-demand to prevent lag and freeze */}
+      {/* ========================================================================= */}
+      {activeTab && (
+        <div id="queue-collapsible-drawer" className="mt-4 pt-4 border-t border-slate-200 animate-fadeIn">
+          {/* TAB 1: Scheduled Messages */}
+          {activeTab === 'scheduled' && (
+            <div id="queue-scheduled-section" className="space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                <div className="flex items-center space-x-2 space-x-reverse">
+                  <h3 className="text-sm font-bold text-slate-800">پیام‌های در نوبت ارسال</h3>
+                  <span className="text-xs bg-blue-100 text-blue-800 px-2 py-0.5 rounded-full font-mono">
+                    {filteredItems.length} پیام
+                  </span>
+                </div>
+
+                <div className="flex items-center space-x-2 space-x-reverse">
+                  {filteredItems.length > 0 && (
+                    <button
+                      onClick={handleClearAll}
+                      className="flex items-center space-x-1 space-x-reverse px-2.5 py-1 text-xs text-rose-600 hover:bg-rose-50 rounded-lg border border-rose-200 transition"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                      <span>پاکسازی صف</span>
+                    </button>
+                  )}
+                  <button
+                    onClick={() => setActiveTab(null)}
+                    className="p-1 text-slate-400 hover:text-slate-600 rounded-lg"
+                    title="بستن کشو"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Search Bar */}
+              <div className="relative">
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={e => setSearchQuery(e.target.value)}
+                  placeholder="جستجو در پیام‌های صف بر اساس متن یا کانال..."
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl pr-3 pl-8 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500 transition"
+                />
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
+              </div>
+
+              {/* Items List */}
+              {displayedItems.length === 0 ? (
+                <div className="p-8 text-center bg-slate-50 rounded-xl border border-dashed border-slate-200">
+                  <Clock className="w-8 h-8 text-slate-300 mx-auto mb-2" />
+                  <p className="text-xs font-semibold text-slate-600">صف ارسال خالی است</p>
+                  <p className="text-[11px] text-slate-400 mt-0.5">هیچ پیامی در نوبت ارسال قرار ندارد.</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {displayedItems.map(item => (
+                    <div
+                      key={item.id}
+                      className="p-3 bg-white hover:bg-slate-50/80 border border-slate-200 rounded-xl transition flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5"
+                    >
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center space-x-2 space-x-reverse flex-wrap gap-y-1 mb-1">
+                          <span className="text-xs font-bold text-slate-800 truncate">
+                            {item.sourceChannelTitle || item.sourceChannelUsername || 'کانال مبدا'}
+                          </span>
+                          <span className="text-[10px] bg-slate-100 text-slate-600 px-1.5 py-0.2 rounded font-mono">
+                            زمان: {formatTehranTime(item.scheduledTime)}
+                          </span>
+                          {item.mediaType && item.mediaType !== 'text' && (
+                            <span className="text-[10px] bg-indigo-50 text-indigo-700 px-1.5 py-0.2 rounded">
+                              {item.mediaType}
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-xs text-slate-600 line-clamp-1 break-words">
+                          {item.messageText ? item.messageText.substring(0, 100) : 'بدون متن (فایل رسانه‌ای)'}
+                        </p>
+                      </div>
+
+                      {/* Item Quick Actions */}
+                      <div className="flex items-center space-x-1.5 space-x-reverse shrink-0 self-end sm:self-auto">
+                        <button
+                          onClick={() => setPreviewItem(item)}
+                          className="p-1.5 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg text-xs"
+                          title="مشاهده جزئیات پیام"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                        </button>
                         <button
                           onClick={() => handleSendNow(item.id)}
                           disabled={actionInProgressId === item.id}
-                          className="p-1.5 text-slate-400 hover:text-amber-600 hover:bg-amber-50 rounded-lg transition"
-                          title="ارسال فوری همین حالا"
+                          className="flex items-center space-x-1 space-x-reverse px-2 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-lg text-[11px] font-medium transition border border-blue-200"
+                          title="ارسال بلافاصله بدون فوت وقت"
                         >
-                          <Zap className={`w-3.5 h-3.5 ${actionInProgressId === item.id ? 'animate-spin' : ''}`} />
+                          <Send className="w-3 h-3" />
+                          <span>ارسال فوری</span>
                         </button>
-                      )}
-
-                      {/* Delete */}
-                      <button
-                        onClick={() => handleDeleteItem(item.id)}
-                        className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition"
-                        title="حذف از صف"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
+                        <button
+                          onClick={() => handleDeleteItem(item.id)}
+                          disabled={actionInProgressId === item.id}
+                          className="p-1.5 text-rose-500 hover:text-rose-700 hover:bg-rose-50 rounded-lg text-xs"
+                          title="حذف از صف"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
+                  ))}
 
-      {/* Confirmation Modal for Clear All Queue */}
-      {confirmClearAllModal && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl p-6 max-w-md w-full shadow-2xl border border-slate-100 space-y-4 text-right">
-            <div className="w-12 h-12 rounded-2xl bg-rose-50 border border-rose-100 flex items-center justify-center text-rose-600 mx-auto">
-              <Trash2 className="w-6 h-6" />
+                  {/* Load More Button if more items exist */}
+                  {filteredItems.length > itemsLimit && (
+                    <button
+                      onClick={() => setItemsLimit(prev => prev + 15)}
+                      className="w-full py-2 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-xl text-xs font-semibold text-slate-600 transition"
+                    >
+                      نمایش ۱۵ مورد بیشتر (باقی‌مانده: {filteredItems.length - itemsLimit})
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
-            <div className="text-center space-y-1.5">
-              <h3 className="text-base font-black text-slate-800">آیا از تخلیه کامل صف اطمینان دارید؟</h3>
-              <p className="text-xs text-slate-500">
-                این عملیات تعداد <strong>{stats.totalQueued} پیام</strong> در انتظار و زمان‌بندی‌شده را از صف حذف می‌کند. پیام‌های جدید مجدداً از کانال‌ها دریافت خواهند شد.
-              </p>
+          )}
+
+          {/* TAB 2: Sent Messages (Successful) */}
+          {activeTab === 'sent' && (
+            <div id="queue-sent-section" className="space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center space-x-2 space-x-reverse">
+                  <h3 className="text-sm font-bold text-slate-800">پیام‌های ارسال‌شده موفق</h3>
+                  <span className="text-xs bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full font-mono">
+                    {filteredItems.length} پیام
+                  </span>
+                </div>
+                <button
+                  onClick={() => setActiveTab(null)}
+                  className="p-1 text-slate-400 hover:text-slate-600 rounded-lg"
+                  title="بستن کشو"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Items List */}
+              {displayedItems.length === 0 ? (
+                <div className="p-8 text-center bg-slate-50 rounded-xl border border-dashed border-slate-200">
+                  <CheckCircle2 className="w-8 h-8 text-slate-300 mx-auto mb-2" />
+                  <p className="text-xs font-semibold text-slate-600">هنوز پیامی ثبت نشده است</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {displayedItems.map(item => (
+                    <div
+                      key={item.id}
+                      className="p-2.5 bg-white border border-slate-200 rounded-xl flex items-center justify-between gap-3 text-xs"
+                    >
+                      <div className="flex items-center space-x-2 space-x-reverse truncate">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+                        <span className="font-bold text-slate-800 truncate">
+                          {item.sourceChannelTitle || item.sourceChannelUsername || 'کانال مبدا'}
+                        </span>
+                        <span className="text-slate-500 truncate max-w-xs sm:max-w-md">
+                          {item.messageText ? item.messageText.substring(0, 70) : 'رسانه'}
+                        </span>
+                      </div>
+                      <div className="flex items-center space-x-2 space-x-reverse shrink-0">
+                        <span className="text-[10px] text-slate-400 font-mono">
+                          {item.sentAt ? formatTehranTime(item.sentAt) : formatTehranTime(item.updatedAt)}
+                        </span>
+                        <button
+                          onClick={() => setPreviewItem(item)}
+                          className="p-1 text-slate-400 hover:text-slate-700"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+
+                  {filteredItems.length > itemsLimit && (
+                    <button
+                      onClick={() => setItemsLimit(prev => prev + 15)}
+                      className="w-full py-2 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-xl text-xs font-semibold text-slate-600 transition"
+                    >
+                      نمایش ۱۵ مورد بیشتر
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
-            <div className="grid grid-cols-2 gap-2 pt-2">
-              <button
-                type="button"
-                onClick={() => setConfirmClearAllModal(false)}
-                className="px-4 py-2.5 rounded-xl border border-slate-200 text-xs font-bold text-slate-600 hover:bg-slate-50 transition"
-              >
-                انصراف
-              </button>
-              <button
-                type="button"
-                onClick={handleClearAllQueue}
-                className="px-4 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-black shadow-xs transition"
-              >
-                بله، تخلیه کامل صف
-              </button>
+          )}
+
+          {/* TAB 3: Failed Messages */}
+          {activeTab === 'failed' && (
+            <div id="queue-failed-section" className="space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center space-x-2 space-x-reverse">
+                  <h3 className="text-sm font-bold text-slate-800">پیام‌های ناموفق و دارای خطا</h3>
+                  <span className="text-xs bg-rose-100 text-rose-800 px-2 py-0.5 rounded-full font-mono">
+                    {filteredItems.length} پیام
+                  </span>
+                </div>
+
+                <div className="flex items-center space-x-2 space-x-reverse">
+                  {filteredItems.length > 0 && (
+                    <>
+                      <button
+                        onClick={handleRetryFailed}
+                        className="flex items-center space-x-1 space-x-reverse px-2.5 py-1 text-xs bg-blue-50 text-blue-700 hover:bg-blue-100 rounded-lg border border-blue-200 transition font-medium"
+                      >
+                        <RotateCcw className="w-3 h-3" />
+                        <span>ارسال مجدد همه</span>
+                      </button>
+                      <button
+                        onClick={handleClearFailed}
+                        className="flex items-center space-x-1 space-x-reverse px-2.5 py-1 text-xs bg-rose-50 text-rose-700 hover:bg-rose-100 rounded-lg border border-rose-200 transition"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                        <span>پاکسازی خطاها</span>
+                      </button>
+                    </>
+                  )}
+                  <button
+                    onClick={() => setActiveTab(null)}
+                    className="p-1 text-slate-400 hover:text-slate-600 rounded-lg"
+                    title="بستن کشو"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Items List */}
+              {displayedItems.length === 0 ? (
+                <div className="p-8 text-center bg-slate-50 rounded-xl border border-dashed border-slate-200">
+                  <CheckCircle2 className="w-8 h-8 text-emerald-400 mx-auto mb-2" />
+                  <p className="text-xs font-semibold text-slate-600">هیچ خطایی در صف ثبت نشده است</p>
+                  <p className="text-[11px] text-slate-400 mt-0.5">تمام ارسال‌ها با موفقیت کامل انجام شده‌اند.</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {displayedItems.map(item => (
+                    <div
+                      key={item.id}
+                      className="p-3 bg-rose-50/40 border border-rose-200 rounded-xl flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2"
+                    >
+                      <div className="min-w-0">
+                        <div className="flex items-center space-x-2 space-x-reverse mb-1">
+                          <span className="text-xs font-bold text-slate-800">
+                            {item.sourceChannelTitle || item.sourceChannelUsername}
+                          </span>
+                          <span className="text-[10px] bg-rose-100 text-rose-800 px-1.5 py-0.5 rounded font-mono">
+                            تلاش‌ها: {item.attemptsCount || 1}
+                          </span>
+                        </div>
+                        {item.lastError && (
+                          <p className="text-xs text-rose-700 font-medium break-words">
+                            علت خطا: {item.lastError}
+                          </p>
+                        )}
+                      </div>
+
+                      <div className="flex items-center space-x-1.5 space-x-reverse shrink-0 self-end sm:self-auto">
+                        <button
+                          onClick={() => handleSendNow(item.id)}
+                          className="flex items-center space-x-1 space-x-reverse px-2 py-1 bg-white text-blue-700 border border-blue-200 rounded-lg text-xs font-medium hover:bg-blue-50"
+                        >
+                          <RotateCcw className="w-3 h-3" />
+                          <span>تلاش مجدد</span>
+                        </button>
+                        <button
+                          onClick={() => handleDeleteItem(item.id)}
+                          className="p-1 text-rose-600 hover:bg-rose-100 rounded-lg"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
-          </div>
+          )}
+
+          {/* TAB 4: Queue Settings Form */}
+          {activeTab === 'settings' && (
+            <form onSubmit={handleSaveSettings} id="queue-settings-form" className="space-y-4">
+              <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                <h3 className="text-sm font-bold text-slate-800 flex items-center space-x-1.5 space-x-reverse">
+                  <Sliders className="w-4 h-4 text-blue-600" />
+                  <span>تنظیمات هوشمند تاخیر، نرخ ارسال و ساعات سکوت</span>
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab(null)}
+                  className="p-1 text-slate-400 hover:text-slate-600 rounded-lg"
+                  title="بستن تنظیمات"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Grid of Inputs */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    حداقل تاخیر تصادفی (ثانیه)
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="180"
+                    value={settings.minDelaySeconds}
+                    onChange={e => setSettings(prev => ({ ...prev, minDelaySeconds: parseInt(e.target.value, 10) || 5 }))}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                  />
+                  <p className="text-[10px] text-slate-400 mt-1">حداقل زمان انتظار قبل از ارسال پیام جدید</p>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    حداکثر تاخیر تصادفی (ثانیه)
+                  </label>
+                  <input
+                    type="number"
+                    min="2"
+                    max="300"
+                    value={settings.maxDelaySeconds}
+                    onChange={e => setSettings(prev => ({ ...prev, maxDelaySeconds: parseInt(e.target.value, 10) || 45 }))}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                  />
+                  <p className="text-[10px] text-slate-400 mt-1">تاخیر متغیر رفتار انسانی شبیه‌سازی می‌کند</p>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    حداکثر تعداد پیام در هر دقیقه
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="60"
+                    value={settings.maxMessagesPerMinute}
+                    onChange={e => setSettings(prev => ({ ...prev, maxMessagesPerMinute: parseInt(e.target.value, 10) || 12 }))}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                  />
+                  <p className="text-[10px] text-slate-400 mt-1">سقف مجاز ارسال در هر ۶۰ ثانیه (توصیه: ۱۰ الی ۱۵)</p>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    حداقل فاصله بین دو ارسال متوالی (ثانیه)
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="60"
+                    value={settings.minIntervalSeconds}
+                    onChange={e => setSettings(prev => ({ ...prev, minIntervalSeconds: parseInt(e.target.value, 10) || 5 }))}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                  />
+                  <p className="text-[10px] text-slate-400 mt-1">فاصله تنفسی میان ارسال‌ها برای جلوگیری از FloodWait</p>
+                </div>
+              </div>
+
+              {/* Silent Hours / Night Mode Section */}
+              <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-2 space-x-reverse">
+                    <Moon className="w-4 h-4 text-indigo-600" />
+                    <div>
+                      <span className="text-xs font-bold text-slate-800">زمان‌بندی تایم شب (ساعات سکوت)</span>
+                      <p className="text-[11px] text-slate-500">
+                        {settings.silentHoursEnabled
+                          ? 'در این ساعات پیام‌ها به صبح روز بعد موکول می‌شوند.'
+                          : 'تایم شب خاموش است؛ پیام‌ها به فردا صبح موکول نمی‌شوند و بی‌وقفه ارسال خواهند شد.'}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Toggle Switch */}
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={settings.silentHoursEnabled}
+                      onChange={e => setSettings(prev => ({ ...prev, silentHoursEnabled: e.target.checked }))}
+                      className="sr-only peer"
+                    />
+                    <div className="w-9 h-5 bg-slate-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:right-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-600"></div>
+                  </label>
+                </div>
+
+                {settings.silentHoursEnabled && (
+                  <div className="grid grid-cols-2 gap-3 pt-2 border-t border-slate-200/80 animate-fadeIn">
+                    <div>
+                      <label className="block text-xs font-medium text-slate-700 mb-1">
+                        شروع ساعات سکوت (به وقت تهران)
+                      </label>
+                      <input
+                        type="time"
+                        value={settings.silentHoursStart}
+                        onChange={e => setSettings(prev => ({ ...prev, silentHoursStart: e.target.value }))}
+                        className="w-full bg-white border border-slate-200 rounded-lg px-2.5 py-1 text-xs text-slate-800 font-mono focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-slate-700 mb-1">
+                        پایان ساعات سکوت و شروع مجدد ارسال
+                      </label>
+                      <input
+                        type="time"
+                        value={settings.silentHoursEnd}
+                        onChange={e => setSettings(prev => ({ ...prev, silentHoursEnd: e.target.value }))}
+                        className="w-full bg-white border border-slate-200 rounded-lg px-2.5 py-1 text-xs text-slate-800 font-mono focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Form Submit Button */}
+              <div className="flex items-center justify-end space-x-2 space-x-reverse pt-2">
+                <button
+                  type="button"
+                  onClick={() => setActiveTab(null)}
+                  className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-medium transition"
+                >
+                  انصراف
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingSettings}
+                  className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold transition shadow-xs flex items-center space-x-1.5 space-x-reverse"
+                >
+                  <span>{isSavingSettings ? 'در حال ذخیره...' : 'ذخیره تنظیمات'}</span>
+                </button>
+              </div>
+            </form>
+          )}
         </div>
       )}
 
-      {/* Message Preview Modal */}
+      {/* Item Details Preview Modal */}
       {previewItem && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl p-6 max-w-lg w-full shadow-2xl border border-slate-100 space-y-4 text-right">
-            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-              <div className="flex items-center gap-2">
-                <span className="p-1.5 rounded-xl bg-indigo-50 text-indigo-600">
-                  {getMediaIcon(previewItem.mediaType)}
-                </span>
-                <div>
-                  <h3 className="text-xs font-black text-slate-800">
-                    پست #{previewItem.originalMessageId} از {previewItem.sourceChannelTitle || previewItem.sourceChannelUsername}
-                  </h3>
-                  <span className="text-2xs text-slate-400">
-                    زمان برنامه‌ریزی: {new Date(previewItem.scheduledTime).toLocaleString('fa-IR')}
-                  </span>
-                </div>
-              </div>
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-xs animate-fadeIn">
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-xl max-w-lg w-full p-4 sm:p-5 text-right space-y-3">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+              <h3 className="text-sm font-bold text-slate-800 flex items-center space-x-1.5 space-x-reverse">
+                <FileText className="w-4 h-4 text-blue-600" />
+                <span>جزئیات پیام در صف</span>
+              </h3>
               <button
                 onClick={() => setPreviewItem(null)}
-                className="p-1.5 rounded-xl text-slate-400 hover:text-slate-600 hover:bg-slate-100"
+                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            <div className="space-y-2">
-              <label className="text-2xs font-bold text-slate-500 block">محتوای پردازش‌شده متن پیام:</label>
-              <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200/80 text-xs font-sans text-slate-800 whitespace-pre-wrap max-h-60 overflow-y-auto leading-relaxed">
-                {previewItem.formattedText || previewItem.messageText || previewItem.mediaMetadata?.caption || 'این پیام فاقد متن است (صرفاً فایل چندرسانه‌ای).'}
+            <div className="space-y-2 text-xs">
+              <div className="flex justify-between py-1 border-b border-slate-100">
+                <span className="text-slate-500">کانال مبدا:</span>
+                <span className="font-bold text-slate-800">
+                  {previewItem.sourceChannelTitle || previewItem.sourceChannelUsername || 'نامشخص'}
+                </span>
               </div>
+              <div className="flex justify-between py-1 border-b border-slate-100">
+                <span className="text-slate-500">شناسه پیام در مبدا:</span>
+                <span className="font-mono text-slate-800">{previewItem.originalMessageId}</span>
+              </div>
+              <div className="flex justify-between py-1 border-b border-slate-100">
+                <span className="text-slate-500">زمان برنامه‌ریزی‌شده ارسال:</span>
+                <span className="font-mono text-slate-800">{formatTehranDateTime(previewItem.scheduledTime)}</span>
+              </div>
+              <div className="flex justify-between py-1 border-b border-slate-100">
+                <span className="text-slate-500">وضعیت فعلی:</span>
+                <span className="font-bold text-slate-800">{previewItem.status}</span>
+              </div>
+              <div>
+                <span className="text-slate-500 block mb-1">متن پیام:</span>
+                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 max-h-48 overflow-y-auto text-slate-800 text-xs whitespace-pre-wrap">
+                  {previewItem.messageText || '(پیام فاقد متن است)'}
+                </div>
+              </div>
+              {previewItem.lastError && (
+                <div className="p-2.5 bg-rose-50 border border-rose-200 rounded-xl text-rose-700 text-xs">
+                  خطا: {previewItem.lastError}
+                </div>
+              )}
             </div>
 
-            {previewItem.mediaMetadata?.removedItems && previewItem.mediaMetadata.removedItems.length > 0 && (
-              <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-2xs text-amber-800">
-                <strong>موارد پاکسازی‌شده خودکار:</strong> {previewItem.mediaMetadata.removedItems.join('، ')}
-              </div>
-            )}
-
-            <div className="flex justify-end gap-2 pt-2">
+            <div className="flex justify-end pt-2 border-t border-slate-100">
               <button
                 onClick={() => setPreviewItem(null)}
-                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition"
+                className="px-4 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-medium transition"
               >
                 بستن
               </button>

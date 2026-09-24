@@ -46,14 +46,8 @@ export const NAV_SECTIONS: NavSection[] = [
     category: 'automation',
   },
   {
-    id: 'engagement-center-card',
-    label: 'دکمه‌های شیشه‌ای و تعاملی',
-    icon: Sparkles,
-    category: 'automation',
-  },
-  {
     id: 'ad-banner-card',
-    label: 'بنر تبلیغاتی و اسپانسر',
+    label: 'اسپانسر و دکمه‌های شیشه‌ای',
     icon: Megaphone,
     category: 'automation',
   },

@@ -4,7 +4,6 @@ import { getSettings, getSources, getLogs, getStats } from './lib/telegramApi';
 import { Navbar, AppTheme } from './components/Navbar';
 import { SidebarNav } from './components/SidebarNav';
 import { StatsOverview } from './components/StatsOverview';
-import { EngagementCenterCard } from './components/EngagementCenterCard';
 import { AdBannerCard } from './components/AdBannerCard';
 import { QueueManagementCard } from './components/QueueManagementCard';
 import { AdminReportGroupCard } from './components/AdminReportGroupCard';
@@ -218,8 +217,8 @@ export default function App() {
             <StatsOverview
               stats={stats}
               onNavigateToEngagement={() => {
-                setActiveTab('engagement-center-card');
-                const el = document.getElementById('engagement-center-card');
+                setActiveTab('ad-banner-card');
+                const el = document.getElementById('ad-banner-card');
                 el?.scrollIntoView({ behavior: 'smooth' });
               }}
               onNavigateToAdBanner={() => {
@@ -231,17 +230,7 @@ export default function App() {
           </div>
         )}
 
-        {/* Engagement Center (Reactions & Glass Inline Buttons) */}
-        {shouldShow('engagement-center-card') && (
-          <div id="engagement-center-card">
-            <EngagementCenterCard
-              destinationChannel={settings.destinationChannel}
-              onRefresh={fetchData}
-            />
-          </div>
-        )}
-
-        {/* Scheduled Ad Banner */}
+        {/* Scheduled Ad Banner & Glass Buttons */}
         {shouldShow('ad-banner-card') && (
           <div id="ad-banner-card">
             <AdBannerCard

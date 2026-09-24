@@ -18,6 +18,7 @@ export interface QueueSettings {
   minIntervalSeconds: number; // default 5
   maxMessagesPerMinute: number; // default 12
   isQueuePaused: boolean; // default false
+  isQueueEnabled: boolean; // default true (master toggle: true = protected smart queue, false = direct instant send)
 }
 
 export type QueueItemStatus = 'pending' | 'scheduled' | 'sending' | 'sent' | 'failed' | 'cancelled';
@@ -52,6 +53,7 @@ export const DEFAULT_QUEUE_SETTINGS: QueueSettings = {
   minIntervalSeconds: 5,
   maxMessagesPerMinute: 12,
   isQueuePaused: false,
+  isQueueEnabled: true,
 };
 
 export class QueueService {
@@ -80,10 +82,29 @@ export class QueueService {
     setInterval(() => this.pruneInMemoryCache(), 60 * 1000);
   }
 
+  public isQueueEnabled(): boolean {
+    return this.settings.isQueueEnabled !== false;
+  }
+
   public updateSettings(newSettings: Partial<QueueSettings>): QueueSettings {
+    const isSilentEnabled = newSettings.silentHoursEnabled !== undefined
+      ? (newSettings.silentHoursEnabled === true || String(newSettings.silentHoursEnabled).trim().toLowerCase() === 'true')
+      : (this.settings.silentHoursEnabled === true || String(this.settings.silentHoursEnabled).trim().toLowerCase() === 'true');
+
+    const isQueueEnabled = newSettings.isQueueEnabled !== undefined
+      ? (newSettings.isQueueEnabled === true || String(newSettings.isQueueEnabled).trim().toLowerCase() === 'true')
+      : (this.settings.isQueueEnabled !== false);
+
+    const isQueuePaused = newSettings.isQueuePaused !== undefined
+      ? (newSettings.isQueuePaused === true || String(newSettings.isQueuePaused).trim().toLowerCase() === 'true')
+      : Boolean(this.settings.isQueuePaused);
+
     this.settings = {
       ...this.settings,
       ...newSettings,
+      silentHoursEnabled: isSilentEnabled,
+      isQueueEnabled: isQueueEnabled,
+      isQueuePaused: isQueuePaused,
       minDelaySeconds: Math.max(1, Number(newSettings.minDelaySeconds ?? this.settings.minDelaySeconds)),
       maxDelaySeconds: Math.max(
         Number(newSettings.minDelaySeconds ?? this.settings.minDelaySeconds),
@@ -92,6 +113,12 @@ export class QueueService {
       minIntervalSeconds: Math.max(1, Number(newSettings.minIntervalSeconds ?? this.settings.minIntervalSeconds)),
       maxMessagesPerMinute: Math.max(1, Number(newSettings.maxMessagesPerMinute ?? this.settings.maxMessagesPerMinute)),
     };
+
+    // If silent hours is turned off/disabled, immediately release any messages that were deferred to morning!
+    if (!isSilentEnabled) {
+      this.releasePostponedSilentHoursItems();
+    }
+
     return { ...this.settings };
   }
 
@@ -99,11 +126,43 @@ export class QueueService {
     if (initialSettings) {
       this.updateSettings(initialSettings);
     }
-    this.loadFromDb().catch((e) => console.warn("[QUEUE] loadFromDb error:", e?.message || e));
+    this.loadFromDb().then(() => {
+      // If silent hours is disabled on startup, make sure no items are stuck deferred to morning
+      if (!this.settings.silentHoursEnabled) {
+        this.releasePostponedSilentHoursItems();
+      }
+    }).catch((e) => console.warn("[QUEUE] loadFromDb error:", e?.message || e));
   }
 
   public getSettings(): QueueSettings {
     return { ...this.settings };
+  }
+
+  /**
+   * Automatically releases any messages that were previously postponed to the next morning
+   * when silent hours is disabled, bringing their scheduled time to right now + random jitter.
+   */
+  public releasePostponedSilentHoursItems(): number {
+    const now = Date.now();
+    let releasedCount = 0;
+    for (const item of this.inMemoryQueue.values()) {
+      if (item.status === 'scheduled') {
+        const itemScheduledMs = new Date(item.scheduledTime).getTime();
+        // If scheduled more than 60 seconds in future, it was deferred
+        if (itemScheduledMs > now + 60 * 1000) {
+          const jitter = this.isQueueEnabled() ? this.calculateRandomDelaySeconds() : 0;
+          const newScheduledTime = new Date(now + jitter * 1000).toISOString();
+          item.scheduledTime = newScheduledTime;
+          item.updatedAt = new Date().toISOString();
+          updateQueueItemInDb(item.id, { scheduledTime: newScheduledTime });
+          releasedCount++;
+        }
+      }
+    }
+    if (releasedCount > 0) {
+      console.log(`[QUEUE] Automatically released ${releasedCount} messages that were postponed to morning hours.`);
+    }
+    return releasedCount;
   }
 
   public async retryFailed(): Promise<number> {
@@ -142,16 +201,23 @@ export class QueueService {
    * Calculates random jitter delay between minDelaySeconds and maxDelaySeconds
    */
   public calculateRandomDelaySeconds(): number {
+    if (this.settings.isQueueEnabled === false) {
+      return 0; // zero delay when queue is disabled (direct instant delivery)
+    }
     const min = Math.max(1, this.settings.minDelaySeconds || 10);
     const max = Math.max(min, this.settings.maxDelaySeconds || 45);
     return Math.floor(Math.random() * (max - min + 1)) + min;
   }
 
   /**
-   * Checks if current Tehran time is within configured Silent Hours
+   * Checks if current Tehran time is within configured Silent Hours.
+   * Strictly verifies that silentHoursEnabled is boolean true (not string "false" or undefined).
    */
   public isCurrentlyInSilentHours(date: Date = new Date()): boolean {
-    if (!this.settings.silentHoursEnabled) return false;
+    const isEnabled = this.settings.silentHoursEnabled === true || String(this.settings.silentHoursEnabled).trim().toLowerCase() === 'true';
+    if (!isEnabled) {
+      return false;
+    }
 
     try {
       const tehranFormatter = new Intl.DateTimeFormat('en-US', {
@@ -187,6 +253,9 @@ export class QueueService {
    * Calculates the end time of current silent hours in milliseconds UTC
    */
   public calculateNextSilentHoursEnd(date: Date = new Date()): number {
+    if (!this.isCurrentlyInSilentHours(date)) {
+      return date.getTime();
+    }
     try {
       const tehranFormatter = new Intl.DateTimeFormat('en-US', {
         timeZone: 'Asia/Tehran',
@@ -277,6 +346,11 @@ export class QueueService {
       this.onStatsChangeCallback();
     }
 
+    // If queue is disabled (direct instant delivery), trigger tick immediately
+    if (!this.isQueueEnabled()) {
+      setTimeout(() => this.processNextQueueTick(), 20);
+    }
+
     return queueItem;
   }
 
@@ -320,18 +394,25 @@ export class QueueService {
       return;
     }
 
-    // 4. Check Rate Limits (Min interval between sends)
-    const minIntervalMs = (this.settings.minIntervalSeconds || 5) * 1000;
-    if (now - this.lastSendTimestamp < minIntervalMs) {
-      return;
-    }
+    // 4. Check Rate Limits (Min interval between sends) - only when queue protection is active
+    if (this.isQueueEnabled()) {
+      const minIntervalMs = (this.settings.minIntervalSeconds || 5) * 1000;
+      if (now - this.lastSendTimestamp < minIntervalMs) {
+        return;
+      }
 
-    // 5. Check Rate Limits (Max messages per minute)
-    const oneMinuteAgo = now - 60 * 1000;
-    this.sendTimestampsInLastMinute = this.sendTimestampsInLastMinute.filter(ts => ts > oneMinuteAgo);
-    const maxPerMin = this.settings.maxMessagesPerMinute || 12;
-    if (this.sendTimestampsInLastMinute.length >= maxPerMin) {
-      return;
+      // 5. Check Rate Limits (Max messages per minute)
+      const oneMinuteAgo = now - 60 * 1000;
+      this.sendTimestampsInLastMinute = this.sendTimestampsInLastMinute.filter(ts => ts > oneMinuteAgo);
+      const maxPerMin = this.settings.maxMessagesPerMinute || 12;
+      if (this.sendTimestampsInLastMinute.length >= maxPerMin) {
+        return;
+      }
+    } else {
+      // When queue is disabled (direct mode): minimal 150ms throttle to prevent socket congestion
+      if (now - this.lastSendTimestamp < 150) {
+        return;
+      }
     }
 
     // 6. Find next scheduled item ready to send
@@ -598,10 +679,12 @@ export class QueueService {
       failedCount,
       totalQueued: pendingCount + scheduledCount + sendingCount,
       isQueuePaused: this.settings.isQueuePaused,
+      isQueueEnabled: this.settings.isQueueEnabled !== false,
       isEmergencyHalted: this.isEmergencyHalted,
       nextScheduledItemTime,
       floodWaitActiveUntil: this.floodWaitUntil > now ? new Date(this.floodWaitUntil).toISOString() : undefined,
       currentRatePerMinute,
+      settings: { ...this.settings },
     };
   }
 

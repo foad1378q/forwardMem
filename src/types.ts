@@ -98,6 +98,7 @@ export interface QueueSettings {
   minIntervalSeconds: number; // default 5
   maxMessagesPerMinute: number; // default 12
   isQueuePaused: boolean; // default false
+  isQueueEnabled: boolean; // default true (master switch: true = smart queue, false = direct send)
 }
 
 export interface QueueStats {
@@ -108,10 +109,12 @@ export interface QueueStats {
   failedCount: number;
   totalQueued: number;
   isQueuePaused: boolean;
+  isQueueEnabled?: boolean; // master toggle state
   isEmergencyHalted?: boolean;
   nextScheduledItemTime?: string;
   floodWaitActiveUntil?: string;
   currentRatePerMinute: number;
+  settings?: QueueSettings;
 }
 
 export interface ReportGroupConfig {
@@ -132,13 +135,6 @@ export interface BotAdminConfig {
   lastCommandReceived?: string;
   lastCommandTime?: string;
   isBotPollingActive?: boolean;
-}
-
-export interface ReactionSettings {
-  enableReactions: boolean; // default: true
-  emojis: string[]; // e.g. ["👍", "❤️", "🔥", "👏"]
-  allowMultiple?: boolean;
-  totalReactionsCount?: number;
 }
 
 export interface InlineButtonConfig {
@@ -165,6 +161,11 @@ export interface AdBannerSettings {
   hourInterval: number; // e.g. every 6 hours
   adText: string;
   adMediaUrl?: string;
+  adMediaBase64?: string; // Uploaded image/video buffer in base64
+  adMediaFileName?: string;
+  adMediaType?: 'photo' | 'video' | 'none';
+  enableButtons?: boolean;
+  buttons?: InlineButtonConfig[];
   adButtonText?: string;
   adButtonUrl?: string;
   pinAdMessage?: boolean;
@@ -206,9 +207,7 @@ export interface BotSettings {
   queueSettings?: QueueSettings;
   // Dedicated Admin Report Group
   reportGroupConfig?: ReportGroupConfig;
-  // Interactive Reaction Counters
-  reactionSettings?: ReactionSettings;
-  // Custom Interactive Inline Buttons
+  // Custom Interactive Inline Buttons (Legacy)
   interactiveButtonsSettings?: InteractiveButtonsSettings;
   // Scheduled & Interval Sponsored Ad Banner
   adBannerSettings?: AdBannerSettings;
@@ -312,7 +311,6 @@ export interface SystemStats {
   dbStatus?: 'connected' | 'local_fallback' | 'error';
   lastReceivedTime?: string;
   currentSendingRate?: number;
-  totalReactionsCount?: number;
   totalAdsSent?: number;
   postsSinceLastAd?: number;
   hourlyActivity?: HourlyActivityPoint[];

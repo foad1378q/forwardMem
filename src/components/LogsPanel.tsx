@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { ActivityLog } from '../types';
-import { clearLogs } from '../lib/telegramApi';
+import { clearLogs, purgeLogsOlderThan24h } from '../lib/telegramApi';
 import { formatTehranTime, formatTehranDateTime } from '../lib/timeUtils';
 import {
   ScrollText,
@@ -14,6 +14,8 @@ import {
   Clock,
   ChevronDown,
   ChevronUp,
+  Sparkles,
+  ShieldCheck,
 } from 'lucide-react';
 
 interface LogsPanelProps {
@@ -33,6 +35,7 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({
   const [filterStatus, setFilterStatus] = useState<string>('all');
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [isClearing, setIsClearing] = useState(false);
+  const [purgeFeedback, setPurgeFeedback] = useState<string | null>(null);
 
   const handleClear = async () => {
     if (!isAdmin) {
@@ -45,6 +48,26 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({
     try {
       await clearLogs();
       onRefresh();
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsClearing(false);
+    }
+  };
+
+  const handlePurge24h = async () => {
+    if (!isAdmin) {
+      onRequireLogin();
+      return;
+    }
+    setIsClearing(true);
+    try {
+      const res = await purgeLogsOlderThan24h();
+      if (res.success) {
+        setPurgeFeedback(res.message || 'لاگ‌های قدیمی‌تر از ۲۴ ساعت حذف شدند.');
+        setTimeout(() => setPurgeFeedback(null), 4000);
+        onRefresh();
+      }
     } catch (err) {
       console.error(err);
     } finally {
@@ -119,9 +142,13 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({
               <span className="bg-blue-50 text-blue-700 text-[10px] font-medium px-2 py-0.5 rounded-full border border-blue-200">
                 ساعت تهران (+03:30)
               </span>
+              <span className="bg-emerald-50 text-emerald-700 text-[10px] font-bold px-2 py-0.5 rounded-full border border-emerald-200 flex items-center gap-1">
+                <ShieldCheck className="w-3 h-3 text-emerald-600" />
+                <span>حذف خودکار ۲۴ ساعته: فعال</span>
+              </span>
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              گزارش واقعی فروارد پیام‌ها، فیلتر کلمات کلیدی، جلوگیری از ارسال تکراری و خطاهای سیستم
+              گزارش واقعی فروارد پیام‌ها (پاکسازی خودکار سوابق قدیمی‌تر از ۲۴ ساعت برای پایداری و عدم کندی سامانه)
             </p>
           </div>
         </div>
@@ -135,6 +162,18 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({
             <RefreshCw className="w-4 h-4" />
           </button>
 
+          {isExpanded && (
+            <button
+              onClick={handlePurge24h}
+              disabled={isClearing}
+              className="flex items-center space-x-1 space-x-reverse px-2.5 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 rounded-xl text-xs font-bold transition"
+              title="حذف لاگ‌های ثبت‌شده قبل از ۲۴ ساعت گذشته"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-amber-600" />
+              <span>پاکسازی ۲۴ ساعته</span>
+            </button>
+          )}
+
           {logs.length > 0 && isExpanded && (
             <button
               onClick={handleClear}
@@ -142,7 +181,7 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({
               className="flex items-center space-x-1.5 space-x-reverse px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-xl text-xs font-bold transition"
             >
               <Trash2 className="w-3.5 h-3.5" />
-              <span>پاکسازی</span>
+              <span>پاکسازی کل</span>
             </button>
           )}
 
@@ -168,6 +207,13 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({
       {/* Collapsible Content Section */}
       {isExpanded && (
         <div className="space-y-4 pt-2 border-t border-slate-100 animate-fadeIn">
+          {purgeFeedback && (
+            <div className="p-2.5 bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs rounded-xl flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+              <span>{purgeFeedback}</span>
+            </div>
+          )}
+
           {/* Filters & Search Bar */}
           <div className="flex flex-col sm:flex-row gap-3">
             <div className="relative flex-1">

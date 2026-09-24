@@ -371,6 +371,22 @@ export async function deleteQueueItem(id: string): Promise<{ success: boolean; m
   return safeFetchJson(`/api/queue/item/${encodeURIComponent(id)}`, { method: "DELETE" }, { success: false, message: "" });
 }
 
+export async function toggleQueueEnable(): Promise<{ success: boolean; isQueueEnabled: boolean; message: string }> {
+  return safeFetchJson("/api/queue/toggle-enable", { method: "POST" }, { success: false, isQueueEnabled: true, message: "" });
+}
+
+export async function releaseDeferredNightMessages(): Promise<{ success: boolean; releasedCount: number; message: string }> {
+  return safeFetchJson("/api/queue/release-deferred", { method: "POST" }, { success: false, releasedCount: 0, message: "" });
+}
+
+export async function getQueueSettings(): Promise<{ success: boolean; settings: any }> {
+  return safeFetchJson("/api/queue/settings", undefined, { success: false, settings: null });
+}
+
+export async function purgeLogsOlderThan24h(): Promise<{ success: boolean; purgedCount: number; remainingCount: number; message: string }> {
+  return safeFetchJson("/api/logs/purge-24h", { method: "POST" }, { success: false, purgedCount: 0, remainingCount: 0, message: "" });
+}
+
 // Admin Report Group APIs
 export async function getReportGroupConfig(): Promise<{ success: boolean; config: any }> {
   return safeFetchJson("/api/report-group", undefined, {
@@ -420,33 +436,7 @@ export async function sendBackupToReportChannel(chatId?: string): Promise<{ succ
   }, { success: false, message: "" });
 }
 
-// --- Reactions & Engagement APIs ---
-export async function getReactionSettings(): Promise<{ success: boolean; reactions: any }> {
-  return safeFetchJson("/api/reactions", undefined, { success: false, reactions: null });
-}
-
-export async function saveReactionSettings(config: any): Promise<{ success: boolean; message: string; reactions: any }> {
-  return safeFetchJson("/api/reactions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(config),
-  }, { success: false, message: "", reactions: null });
-}
-
-// --- Interactive Inline Buttons APIs ---
-export async function getInteractiveButtonsSettings(): Promise<{ success: boolean; buttons: any }> {
-  return safeFetchJson("/api/interactive-buttons", undefined, { success: false, buttons: null });
-}
-
-export async function saveInteractiveButtonsSettings(config: any): Promise<{ success: boolean; message: string; buttons: any }> {
-  return safeFetchJson("/api/interactive-buttons", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(config),
-  }, { success: false, message: "", buttons: null });
-}
-
-// --- Scheduled & Interval Ad Banner APIs ---
+// --- Scheduled & Interval Sponsored Ad Banner APIs (with Glass Buttons & Upload) ---
 export async function getAdBannerSettings(): Promise<{ success: boolean; adBanner: any }> {
   return safeFetchJson("/api/ad-banner", undefined, { success: false, adBanner: null });
 }
@@ -457,6 +447,19 @@ export async function saveAdBannerSettings(config: any): Promise<{ success: bool
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(config),
   }, { success: false, message: "", adBanner: null });
+}
+
+export async function uploadAdBannerMedia(data: {
+  base64: string;
+  fileName: string;
+  mimeType: string;
+  mediaType?: 'photo' | 'video';
+}): Promise<{ success: boolean; message: string; adBanner?: any }> {
+  return safeFetchJson("/api/ad-banner/upload", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  }, { success: false, message: "" });
 }
 
 export async function sendAdBannerNow(): Promise<{ success: boolean; message: string }> {
